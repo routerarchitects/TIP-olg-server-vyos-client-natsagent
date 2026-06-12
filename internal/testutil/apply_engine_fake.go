@@ -10,6 +10,7 @@ import (
 // FakeApplyEngine is a controllable configure ApplyEngine test double.
 type FakeApplyEngine struct {
 	Err      error
+	Errs     []error
 	Validate func(renderer.Output) error
 	Events   *EventRecorder
 
@@ -28,6 +29,10 @@ func (f *FakeApplyEngine) Apply(ctx context.Context, rendered renderer.Output) e
 	f.inputs = append(f.inputs, rendered)
 	validate := f.Validate
 	err := f.Err
+	if len(f.Errs) > 0 {
+		err = f.Errs[0]
+		f.Errs = f.Errs[1:]
+	}
 	f.mu.Unlock()
 
 	if validate != nil {

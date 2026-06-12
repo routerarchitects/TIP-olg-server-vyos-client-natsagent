@@ -76,6 +76,12 @@ func (f *FakeStateStore) LastSavedState() (state.State, bool) {
 	return f.savedStates[len(f.savedStates)-1], true
 }
 
+func (f *FakeStateStore) CurrentState() state.State {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.Current
+}
+
 func (f *FakeStateStore) Reset() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
