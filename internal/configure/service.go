@@ -210,7 +210,7 @@ func (s *Service) Handle(ctx context.Context, msg agentcore.ConfigureNotificatio
 }
 
 func (s *Service) fail(ctx context.Context, msg agentcore.ConfigureNotification, code, safeMessage string, originalErr error) error {
-	s.logError("configure failed", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "stage", "failed", "status", "failure", "error", originalErr)
+	s.logError("configure failed", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "stage", "failed", "status", "failure", "error_code", code, "message", safeMessage)
 
 	var statusErr error
 	if err := s.publishStatus(ctx, msg, "failure", "failed", "configure processing failed"); err != nil {

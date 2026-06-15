@@ -130,7 +130,7 @@ func (s *Service) Handle(ctx context.Context, msg agentcore.ActionCommand) error
 }
 
 func (s *Service) fail(ctx context.Context, msg agentcore.ActionCommand, code, safeMessage string, originalErr error) error {
-	s.logError("action failed", "target", msg.Target, "action", msg.Action, "rpc_id", msg.RPCID, "stage", "failed", "status", "failure", "error", originalErr)
+	s.logError("action failed", "target", msg.Target, "action", msg.Action, "rpc_id", msg.RPCID, "stage", "failed", "status", "failure", "error_code", code, "message", safeMessage)
 
 	var statusErr error
 	if err := s.publishStatus(ctx, msg, "failure", "failed", "action processing failed"); err != nil {
