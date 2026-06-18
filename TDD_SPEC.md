@@ -698,10 +698,10 @@ Keep existing smoke scripts and define what they must prove.
 
 | Script | Purpose | Required Status |
 |---|---|---|
-| `tests/scripts/validate-config.sh` | Validate config loading/conversion | P0 |
-| `phase3-real-nats-configure-smoke.sh` | Configure E2E with real NATS | P0 |
-| `phase4-real-nats-action-smoke.sh` | Action E2E with real NATS | P0 |
-| `tests/scripts/real-vyos-configure-lab-smoke.sh` | Real VyOS lab smoke | P1/manual or release gate |
+| `tests/smoke/validate-config.sh` | Validate config loading/conversion | P0 |
+| `tests/smoke/real-nats-configure-smoke.sh` | Configure E2E with real NATS | P0 |
+| `tests/smoke/real-nats-action-smoke.sh` | Action E2E with real NATS | P0 |
+| `tests/lab/real-vyos-configure-smoke.sh` | Real VyOS lab smoke | P1/manual or release gate |
 
 ## 18.3 Required Smoke Validations
 
@@ -872,7 +872,7 @@ This section is complete when:
 | Test Group | Command or Method |
 |---|---|
 | Go unit tests | `go test ./...` |
-| Config tests | Go tests plus `tests/scripts/validate-config.sh` |
+| Config tests | Go tests plus `tests/smoke/validate-config.sh` |
 | Configure workflow mocked tests | Go unit/integration tests |
 | Configure failure injection tests | Go unit tests |
 | Action workflow tests | Go unit/integration tests |

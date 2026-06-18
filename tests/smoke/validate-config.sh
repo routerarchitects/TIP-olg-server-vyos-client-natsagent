@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Manual config validation smoke check
+# Config validation smoke check
 #
 # What this validates:
 # 1. Config path resolution and YAML load

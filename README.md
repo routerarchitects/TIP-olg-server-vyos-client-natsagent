@@ -245,36 +245,36 @@ go build ./...
 go run ./cmd/vyos-nats-agent --config ./config.example.yaml --validate-config
 ```
 
-## Phase smoke scripts
+## Smoke Scripts
 
-Phase 4 action smoke:
+Action smoke:
 
 ```bash
-./tests/scripts/phase4-real-nats-action-smoke.sh
+./tests/smoke/real-nats-action-smoke.sh
 ```
 
 Expected success marker:
 
 ```text
-[PASS] Phase 4 real-NATS action smoke test passed
+[PASS] Real-NATS action smoke test passed
 ```
 
 Configure smoke:
 
 ```bash
-./tests/scripts/phase3-real-nats-configure-smoke.sh
+./tests/smoke/real-nats-configure-smoke.sh
 ```
 
 Expected success marker:
 
 ```text
-[PASS] Phase 3 real-NATS configure smoke test passed
+[PASS] Real-NATS configure smoke test passed
 ```
 
-Optional debug output for Phase 4 action smoke:
+Optional debug output for action smoke:
 
 ```bash
-PRINT_LOGS_ON_PASS=true KEEP_SMOKE_ARTIFACTS=true NATS_PORT=4223 ./tests/scripts/phase4-real-nats-action-smoke.sh
+PRINT_LOGS_ON_PASS=true KEEP_SMOKE_ARTIFACTS=true NATS_PORT=4223 ./tests/smoke/real-nats-action-smoke.sh
 ```
 
 `PRINT_LOGS_ON_PASS=true` prints NATS/agent/controller logs on success.  
@@ -284,8 +284,11 @@ PRINT_LOGS_ON_PASS=true KEEP_SMOKE_ARTIFACTS=true NATS_PORT=4223 ./tests/scripts
 Config validation script:
 
 ```bash
-./tests/scripts/validate-config.sh
+./tests/smoke/validate-config.sh
 ```
+
+Manual real-VyOS lab smoke lives under `tests/lab` and is not part of normal
+PR CI. See `tests/lab/README.md` before running it against a lab VM/device.
 
 ## CI coverage
 
@@ -294,9 +297,9 @@ Config validation script:
 - `gofmt` formatting check
 - `go test ./...`
 - `go build ./...`
-- `./tests/scripts/validate-config.sh`
-- `./tests/scripts/phase3-real-nats-configure-smoke.sh`
-- `./tests/scripts/phase4-real-nats-action-smoke.sh`
+- `./tests/smoke/validate-config.sh`
+- `./tests/smoke/real-nats-configure-smoke.sh`
+- `./tests/smoke/real-nats-action-smoke.sh`
 
 ## Binary usage
 

@@ -3,6 +3,11 @@
   "schema_version": "4.2.0",
   "config": {
     "uuid": 1779874987,
+    "services": {
+      "ssh": {
+        "port": 22
+      }
+    },
     "interfaces": [
       {
         "name": "OLG_APPLY_SMOKE_TEST_Upstream",

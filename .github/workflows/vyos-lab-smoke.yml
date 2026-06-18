@@ -1,0 +1,93 @@
+name: VyOS Lab Smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      desired_config:
+        description: "Lab config fixture"
+        required: false
+        default: "tests/lab/configs/desired-vyos-wan-only-config.json"
+      target:
+        description: "VyOS target"
+        required: true
+        default: "vyos"
+      state_path:
+        description: "Agent state path on VyOS"
+        required: true
+        default: "/tmp/vyos-nats-agent/state.json"
+
+permissions:
+  contents: read
+
+jobs:
+  real-vyos-configure-smoke:
+    name: Real VyOS Configure Smoke
+    runs-on: [self-hosted, vyos-lab]
+    timeout-minutes: 20
+    env:
+      LAB_ARTIFACT_DIR: ${{ github.workspace }}/tests/lab/artifacts/github-actions/run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+      SSH_KEY_PATH: ${{ runner.temp }}/vyos_lab_key
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Prepare SSH key
+        env:
+          VYOS_SSH_KEY_SECRET: ${{ secrets.VYOS_SSH_KEY }}
+        run: |
+          if [ -n "$VYOS_SSH_KEY_SECRET" ]; then
+            rm -f "$SSH_KEY_PATH"
+            printf '%s' "$VYOS_SSH_KEY_SECRET" > "$SSH_KEY_PATH"
+            chmod 600 "$SSH_KEY_PATH"
+          fi
+
+      - name: Prepare lab artifact directory
+        run: |
+          rm -rf "$LAB_ARTIFACT_DIR"
+          mkdir -p "$LAB_ARTIFACT_DIR"
+
+      - name: Run real VyOS configure smoke
+        env:
+          REAL_VYOS_LAB_ACK: I_UNDERSTAND
+          NATS_URL: ${{ secrets.NATS_URL }}
+          VYOS_TARGET: ${{ inputs.target }}
+          VYOS_HOST: ${{ secrets.VYOS_HOST }}
+          VYOS_USER: ${{ secrets.VYOS_USER }}
+          VYOS_PASSWORD: ${{ secrets.VYOS_PASSWORD }}
+          STATE_PATH: ${{ inputs.state_path }}
+          DESIRED_CONFIG_FILE: ${{ inputs.desired_config }}
+          ARTIFACT_DIR: ${{ env.LAB_ARTIFACT_DIR }}
+        run: |
+          if [ -f "$SSH_KEY_PATH" ]; then
+            export VYOS_SSH_KEY="$SSH_KEY_PATH"
+            unset VYOS_PASSWORD
+          fi
+          ./tests/lab/real-vyos-configure-smoke.sh
+
+      - name: Collect lab evidence
+        if: always()
+        env:
+          ARTIFACT_DIR: ${{ env.LAB_ARTIFACT_DIR }}
+        run: ./tests/lab/collect-lab-evidence.sh
+
+      - name: Cleanup SSH key
+        if: always()
+        run: |
+          if [ -f "$SSH_KEY_PATH" ]; then
+            shred -u "$SSH_KEY_PATH" 2>/dev/null || rm -f "$SSH_KEY_PATH"
+          fi
+
+      - name: Review artifact location
+        if: always()
+        run: |
+          echo "Lab evidence collected locally on this self-hosted runner:"
+          echo "  $LAB_ARTIFACT_DIR"
+          echo "Artifacts are not uploaded automatically."
+          echo "Review and sanitize files in that directory before sharing them in a PR, release note, or any external channel."

@@ -38,28 +38,24 @@ func TestMinimalDesiredConfigRendersWithRealRenderer(t *testing.T) {
 
 /*
 TC-TESTUTIL-FIXTURES-002
-Type: Positive
+Type: Safety
 Title: Placeholder desired config remains explicit
 Summary:
-Builds the placeholder-only desired config fixture and renders it with
-the real renderer adapter. The fixture intentionally preserves the old
-empty payload behavior under a name that limits its scope.
+Builds the placeholder-only desired config fixture and inspects its
+payload shape directly. The fixture intentionally preserves the old
+empty payload behavior under a name that limits its scope, without
+depending on how a particular renderer version treats empty config.
 
 Validates:
-  - MinimalPlaceholderDesiredConfig renders without adapter errors
-  - placeholder-only payload renders empty command text
+  - MinimalPlaceholderDesiredConfig keeps the explicit placeholder payload
+  - placeholder payload stays distinct from MinimalDesiredConfig
 */
 func TestMinimalPlaceholderDesiredConfigIsExplicitlyPlaceholderOnly(t *testing.T) {
-	adapter, err := renderervyos.New()
-	if err != nil {
-		t.Fatalf("new renderer adapter: %v", err)
+	placeholder := MinimalPlaceholderDesiredConfig()
+	if got := string(placeholder.Record.Payload); got != `{"interfaces":[],"services":{}}` {
+		t.Fatalf("placeholder payload got=%s want explicit placeholder payload", got)
 	}
-
-	out, err := adapter.Render(context.Background(), MinimalPlaceholderDesiredConfig())
-	if err != nil {
-		t.Fatalf("render placeholder desired config: %v", err)
-	}
-	if out.Text != "" {
-		t.Fatalf("placeholder rendered text got=%q want empty", out.Text)
+	if string(placeholder.Record.Payload) == string(MinimalDesiredConfig().Record.Payload) {
+		t.Fatal("placeholder fixture should remain distinct from minimal renderable desired config")
 	}
 }

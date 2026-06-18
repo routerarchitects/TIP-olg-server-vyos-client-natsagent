@@ -24,27 +24,24 @@ func MinimalPlaceholderDesiredConfig() agentcore.StoredDesiredConfig {
 
 func MinimalRenderableDesiredConfig() agentcore.StoredDesiredConfig {
 	return DesiredConfig(MinimalTarget, MinimalUUID, json.RawMessage(`{
-		"interfaces": [
-			{
-				"ethernet": [{"select-ports": ["WAN*"]}],
-				"ipv4": {"addressing": "dynamic"},
-				"name": "WAN",
-				"role": "upstream",
-				"services": ["ssh"]
+		"schema_name": "olg-ucentral",
+		"schema_version": "4.2.0",
+		"config": {
+			"services": {
+				"ssh": {"port": 22}
 			},
-			{
-				"ethernet": [{"select-ports": ["LAN*"]}],
-				"ipv4": {
-					"addressing": "static",
-					"subnet": "192.168.60.1/24"
-				},
-				"name": "LAN",
-				"role": "downstream",
-				"services": ["ssh"]
-			}
-		],
-		"services": {
-			"ssh": {"port": 22}
+			"interfaces": [
+				{
+					"name": "OLG_APPLY_SMOKE_TEST_Upstream",
+					"role": "upstream",
+					"ethernet": [
+						{"select-ports": ["WAN*"]}
+					],
+					"ipv4": {
+						"addressing": "dynamic"
+					}
+				}
+			]
 		}
 	}`))
 }

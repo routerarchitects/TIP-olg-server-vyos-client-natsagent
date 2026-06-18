@@ -69,19 +69,19 @@ jobs:
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: Make scripts executable
-        run: chmod +x tests/scripts/*.sh
+        run: chmod +x tests/smoke/*.sh
 
       - name: Validate config script
-        run: ./tests/scripts/validate-config.sh
+        run: ./tests/smoke/validate-config.sh
 
       - name: Mocked integration tests
         timeout-minutes: 5
         run: go test -tags=integration ./...
 
-      - name: Phase 3 configure smoke
+      - name: Real-NATS configure smoke
         timeout-minutes: 5
-        run: NATS_PORT=4223 ./tests/scripts/phase3-real-nats-configure-smoke.sh
+        run: NATS_PORT=4223 ./tests/smoke/real-nats-configure-smoke.sh
 
-      - name: Phase 4 action smoke
+      - name: Real-NATS action smoke
         timeout-minutes: 5
-        run: NATS_PORT=4224 ./tests/scripts/phase4-real-nats-action-smoke.sh
+        run: NATS_PORT=4224 ./tests/smoke/real-nats-action-smoke.sh

@@ -1,19 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Phase 3 real-NATS configure smoke test for vyos-nats-agent.
+# Real-NATS action smoke test for vyos-nats-agent.
 #
 # Proves:
 # - starts a real nats-server with JetStream enabled
 # - starts a controller client using nats-agent-core
 # - starts vyos-nats-agent against the same NATS server
-# - submits configure and expects success result
-# - verifies state file contains applied_uuid
-# - submits same UUID again and expects already_in_sync success result
+# - submits trace action and expects action workflow statuses
+# - verifies final action result success with placeholder payload
 # - stops agent with SIGINT and verifies graceful shutdown
 #
 # Usage:
-#   ./tests/scripts/phase3-real-nats-configure-smoke.sh
+#   ./tests/smoke/real-nats-action-smoke.sh
 #
 # Optional environment variables:
 #   NATS_PORT=4223                Use a non-default NATS port if 4222 is busy.
@@ -22,7 +21,7 @@ set -euo pipefail
 #
 # Example:
 #   PRINT_LOGS_ON_PASS=true KEEP_SMOKE_ARTIFACTS=true NATS_PORT=4223 \
-#     ./tests/scripts/phase3-real-nats-configure-smoke.sh
+#     ./tests/smoke/real-nats-action-smoke.sh
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -32,15 +31,15 @@ NATS_URL="nats://127.0.0.1:${NATS_PORT}"
 PRINT_LOGS_ON_PASS="${PRINT_LOGS_ON_PASS:-false}"      # true|false
 KEEP_SMOKE_ARTIFACTS="${KEEP_SMOKE_ARTIFACTS:-false}"  # true|false
 
-WORK_DIR="$(mktemp -d -t vyos-nats-agent-phase3-XXXXXX)"
+mkdir -p "${ROOT_DIR}/.tmp"
+WORK_DIR="$(mktemp -d "${ROOT_DIR}/.tmp/vyos-nats-agent-action-smoke-XXXXXX")"
 TMP_CONFIG="${WORK_DIR}/config.yaml"
-STATE_FILE="${WORK_DIR}/state.json"
 NATS_LOG="${WORK_DIR}/nats-server.log"
 AGENT_LOG="${WORK_DIR}/vyos-nats-agent.log"
 CONTROLLER_LOG="${WORK_DIR}/controller.log"
 AGENT_BIN="${WORK_DIR}/vyos-nats-agent"
 READY_FILE="${WORK_DIR}/controller.ready"
-CONTROLLER_DIR="${ROOT_DIR}/.tmp/phase3-configure-smoke-controller"
+CONTROLLER_DIR="${WORK_DIR}/controller"
 
 NATS_PID=""
 AGENT_PID=""
@@ -80,10 +79,10 @@ fail() {
   [[ -f "${NATS_LOG}" ]] && tail -n 140 "${NATS_LOG}" >&2 || true
   echo "" >&2
   echo "---- agent log ----" >&2
-  [[ -f "${AGENT_LOG}" ]] && tail -n 200 "${AGENT_LOG}" >&2 || true
+  [[ -f "${AGENT_LOG}" ]] && tail -n 220 "${AGENT_LOG}" >&2 || true
   echo "" >&2
   echo "---- controller log ----" >&2
-  [[ -f "${CONTROLLER_LOG}" ]] && tail -n 220 "${CONTROLLER_LOG}" >&2 || true
+  [[ -f "${CONTROLLER_LOG}" ]] && tail -n 260 "${CONTROLLER_LOG}" >&2 || true
   exit 1
 }
 
@@ -93,10 +92,10 @@ print_logs() {
   [[ -f "${NATS_LOG}" ]] && tail -n 220 "${NATS_LOG}" || true
   echo ""
   echo "---- agent log ----"
-  [[ -f "${AGENT_LOG}" ]] && tail -n 260 "${AGENT_LOG}" || true
+  [[ -f "${AGENT_LOG}" ]] && tail -n 280 "${AGENT_LOG}" || true
   echo ""
   echo "---- controller log ----"
-  [[ -f "${CONTROLLER_LOG}" ]] && tail -n 280 "${CONTROLLER_LOG}" || true
+  [[ -f "${CONTROLLER_LOG}" ]] && tail -n 320 "${CONTROLLER_LOG}" || true
 }
 
 require_cmd() {
@@ -150,10 +149,7 @@ if port_in_use "${NATS_PORT}"; then
 fi
 
 echo "[INFO] preparing temporary config at ${TMP_CONFIG}"
-sed \
-  -e "s#nats://127.0.0.1:4222#${NATS_URL}#g" \
-  -e "s#state_file: /tmp/vyos-nats-agent/state.json#state_file: ${STATE_FILE}#g" \
-  config.example.yaml > "${TMP_CONFIG}"
+sed -e "s#nats://127.0.0.1:4222#${NATS_URL}#g" config.example.yaml > "${TMP_CONFIG}"
 
 echo "[INFO] building vyos-nats-agent"
 go build -o "${AGENT_BIN}" ./cmd/vyos-nats-agent
@@ -187,8 +183,13 @@ import (
 
 const wireVersion = "1.0"
 
-type localState struct {
-	AppliedUUID string `json:"applied_uuid"`
+type actionPayload struct {
+	Executor         string `json:"executor"`
+	Action           string `json:"action"`
+	Target           string `json:"target"`
+	Status           string `json:"status"`
+	Placeholder      bool   `json:"placeholder"`
+	ReceivedPayload  bool   `json:"received_payload"`
 }
 
 func main() {
@@ -214,8 +215,8 @@ func main() {
 	if err != nil {
 		fatalf("convert config: %v", err)
 	}
-	coreCfg.AgentName = "vyos-nats-agent-phase3-configure-controller"
-	coreCfg.NATS.ClientName = "vyos-nats-agent-phase3-configure-controller"
+coreCfg.AgentName = "vyos-nats-agent-action-smoke-controller"
+coreCfg.NATS.ClientName = "vyos-nats-agent-action-smoke-controller"
 
 	client, err := agentcore.New(coreCfg)
 	if err != nil {
@@ -227,8 +228,8 @@ func main() {
 	target := appCfg.Agent.Target
 
 	if err := client.RegisterStatusHandler(target, func(ctx context.Context, msg agentcore.StatusEnvelope) error {
-		fmt.Printf("[CONTROLLER] status target=%s rpc_id=%s uuid=%s status=%s stage=%s message=%q\n",
-			msg.Target, msg.RPCID, msg.UUID, msg.Status, msg.Stage, msg.Message)
+		fmt.Printf("[CONTROLLER] status target=%s rpc_id=%s status=%s stage=%s message=%q\n",
+			msg.Target, msg.RPCID, msg.Status, msg.Stage, msg.Message)
 		select {
 		case statusCh <- msg:
 		default:
@@ -239,8 +240,8 @@ func main() {
 	}
 
 	if err := client.RegisterResultHandler(target, func(ctx context.Context, msg agentcore.ResultEnvelope) error {
-		fmt.Printf("[CONTROLLER] result target=%s rpc_id=%s uuid=%s result=%s error_code=%s message=%q\n",
-			msg.Target, msg.RPCID, msg.UUID, msg.Result, msg.ErrorCode, msg.Message)
+		fmt.Printf("[CONTROLLER] result target=%s command_type=%s action=%s rpc_id=%s result=%s error_code=%s message=%q\n",
+			msg.Target, msg.CommandType, msg.Action, msg.RPCID, msg.Result, msg.ErrorCode, msg.Message)
 		select {
 		case resultCh <- msg:
 		default:
@@ -272,51 +273,51 @@ func main() {
 
 	waitForStartupStatus(ctx, statusCh)
 
-	uuid := fmt.Sprintf("cfg-phase3-smoke-%d", time.Now().UnixNano())
-	firstRPC := fmt.Sprintf("phase3-smoke-configure-1-%d", time.Now().UnixNano())
-
-	_, err = client.SubmitConfigure(ctx, agentcore.ConfigureCommand{
-		Version:   wireVersion,
-		RPCID:     firstRPC,
-		Target:    target,
-		UUID:      uuid,
-		Payload:   json.RawMessage(`{"hostname":"phase3-smoke-router"}`),
-		Timestamp: time.Now().UTC(),
+	rpcID := fmt.Sprintf("smoke-action-%d", time.Now().UnixNano())
+	_, err = client.SubmitAction(ctx, agentcore.ActionCommand{
+		Version:     wireVersion,
+		RPCID:       rpcID,
+		Target:      target,
+		CommandType: "action",
+		Action:      "trace",
+		Payload:     json.RawMessage(`{"probe":"action-smoke"}`),
+		Timestamp:   time.Now().UTC(),
 	})
 	if err != nil {
-		fatalf("submit first configure command: %v", err)
+		fatalf("submit trace action: %v", err)
 	}
-	fmt.Printf("[CONTROLLER] submitted first configure rpc_id=%s uuid=%s\n", firstRPC, uuid)
+	fmt.Printf("[CONTROLLER] submitted trace action rpc_id=%s\n", rpcID)
 
-	waitForStatus(ctx, statusCh, firstRPC, uuid, "applied", "success")
-	firstResult := waitForResult(ctx, resultCh, firstRPC, uuid)
-	if firstResult.Result != "success" {
-		fatalf("expected first configure success result, got result=%q error_code=%q message=%q", firstResult.Result, firstResult.ErrorCode, firstResult.Message)
+	waitForActionStatus(ctx, statusCh, rpcID, "received", "running")
+	waitForActionStatus(ctx, statusCh, rpcID, "executing", "running")
+	waitForActionStatus(ctx, statusCh, rpcID, "completed", "success")
+
+	result := waitForActionResult(ctx, resultCh, rpcID)
+	if result.Result != "success" {
+		fatalf("expected success result, got result=%q error_code=%q message=%q", result.Result, result.ErrorCode, result.Message)
 	}
-
-	waitForStateUUID(ctx, appCfg.Agent.StateFile, uuid)
-
-	secondRPC := fmt.Sprintf("phase3-smoke-configure-2-%d", time.Now().UnixNano())
-	_, err = client.SubmitConfigure(ctx, agentcore.ConfigureCommand{
-		Version:   wireVersion,
-		RPCID:     secondRPC,
-		Target:    target,
-		UUID:      uuid,
-		Payload:   json.RawMessage(`{"hostname":"phase3-smoke-router"}`),
-		Timestamp: time.Now().UTC(),
-	})
-	if err != nil {
-		fatalf("submit second configure command: %v", err)
+	if result.CommandType != "action" || result.Action != "trace" {
+		fatalf("unexpected action result metadata command_type=%q action=%q", result.CommandType, result.Action)
 	}
-	fmt.Printf("[CONTROLLER] submitted second configure rpc_id=%s uuid=%s\n", secondRPC, uuid)
-
-	waitForStatus(ctx, statusCh, secondRPC, uuid, "already_in_sync", "success")
-	secondResult := waitForResult(ctx, resultCh, secondRPC, uuid)
-	if secondResult.Result != "success" || secondResult.Message != "desired config already applied" {
-		fatalf("expected second configure already_in_sync success result, got result=%q error_code=%q message=%q", secondResult.Result, secondResult.ErrorCode, secondResult.Message)
+	if result.RPCID != rpcID {
+		fatalf("rpc id mismatch expected=%q got=%q", rpcID, result.RPCID)
 	}
 
-	fmt.Println("[CONTROLLER] phase3 configure smoke flow passed")
+	if !json.Valid(result.Payload) {
+		fatalf("result payload is not valid json")
+	}
+	var payload actionPayload
+	if err := json.Unmarshal(result.Payload, &payload); err != nil {
+		fatalf("decode result payload: %v", err)
+	}
+	if !payload.Placeholder || payload.Executor != "placeholder_trace" {
+		fatalf("unexpected payload placeholder=%v executor=%q", payload.Placeholder, payload.Executor)
+	}
+	if payload.Action != "trace" || payload.Target != target || payload.Status != "completed" {
+		fatalf("unexpected payload action=%q target=%q status=%q", payload.Action, payload.Target, payload.Status)
+	}
+
+	fmt.Println("[CONTROLLER] action smoke flow passed")
 }
 
 func waitForStartupStatus(ctx context.Context, ch <-chan agentcore.StatusEnvelope) {
@@ -332,50 +333,30 @@ func waitForStartupStatus(ctx context.Context, ch <-chan agentcore.StatusEnvelop
 	}
 }
 
-func waitForStatus(ctx context.Context, ch <-chan agentcore.StatusEnvelope, rpcID string, uuid string, stage string, status string) {
+func waitForActionStatus(ctx context.Context, ch <-chan agentcore.StatusEnvelope, rpcID, stage, status string) {
 	for {
 		select {
 		case <-ctx.Done():
-			fatalf("timed out waiting for status rpc_id=%s uuid=%s stage=%s: %v", rpcID, uuid, stage, ctx.Err())
+			fatalf("timed out waiting for action status rpc_id=%s stage=%s status=%s: %v", rpcID, stage, status, ctx.Err())
 		case msg := <-ch:
-			if msg.RPCID == rpcID && msg.UUID == uuid && msg.Stage == stage && msg.Status == status {
+			if msg.RPCID == rpcID && msg.Stage == stage && msg.Status == status {
 				return
 			}
 		}
 	}
 }
 
-func waitForResult(ctx context.Context, ch <-chan agentcore.ResultEnvelope, rpcID string, uuid string) agentcore.ResultEnvelope {
+func waitForActionResult(ctx context.Context, ch <-chan agentcore.ResultEnvelope, rpcID string) agentcore.ResultEnvelope {
 	for {
 		select {
 		case <-ctx.Done():
-			fatalf("timed out waiting for result rpc_id=%s uuid=%s: %v", rpcID, uuid, ctx.Err())
+			fatalf("timed out waiting for action result rpc_id=%s: %v", rpcID, ctx.Err())
 		case msg := <-ch:
-			if msg.RPCID == rpcID && msg.UUID == uuid && msg.CommandType == "configure" {
+			if msg.RPCID == rpcID && msg.CommandType == "action" && msg.Action == "trace" {
 				return msg
 			}
 		}
 	}
-}
-
-func waitForStateUUID(ctx context.Context, path string, uuid string) {
-	for i := 0; i < 60; i++ {
-		select {
-		case <-ctx.Done():
-			fatalf("timed out waiting for state file %q to contain applied_uuid=%s: %v", path, uuid, ctx.Err())
-		default:
-		}
-
-		data, err := os.ReadFile(path)
-		if err == nil {
-			var st localState
-			if jsonErr := json.Unmarshal(data, &st); jsonErr == nil && st.AppliedUUID == uuid {
-				return
-			}
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	fatalf("state file %q does not contain applied_uuid=%s", path, uuid)
 }
 
 func fatalf(format string, args ...any) {
@@ -406,13 +387,6 @@ if ! wait "${CONTROLLER_PID}"; then
 fi
 CONTROLLER_PID=""
 
-if [[ ! -f "${STATE_FILE}" ]]; then
-  fail "state file not found: ${STATE_FILE}"
-fi
-if ! grep -q '"applied_uuid"' "${STATE_FILE}"; then
-  fail "state file does not contain applied_uuid: ${STATE_FILE}"
-fi
-
 echo "[INFO] stopping vyos-nats-agent with SIGINT"
 kill -INT "${AGENT_PID}" >/dev/null 2>&1 || true
 
@@ -428,7 +402,7 @@ if [[ -n "${AGENT_PID}" ]]; then
   fail "vyos-nats-agent did not exit after SIGINT"
 fi
 
-echo "[PASS] Phase 3 real-NATS configure smoke test passed"
+echo "[PASS] Real-NATS action smoke test passed"
 
 if [[ "${PRINT_LOGS_ON_PASS}" == "true" ]]; then
   print_logs
