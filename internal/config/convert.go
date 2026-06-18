@@ -1,6 +1,6 @@
 package config
 
-import "github.com/routerarchitects/nats-agent-core/agentcore"
+import "github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
 
 func (c AppConfig) ToAgentCoreConfig() (agentcore.Config, error) {
 	connectTimeout, err := parseDurationField("agentcore.nats.connect_timeout", c.AgentCore.NATS.ConnectTimeout, false)

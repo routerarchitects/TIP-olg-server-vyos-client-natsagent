@@ -3,7 +3,7 @@ package agent
 import (
 	"testing"
 
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/config"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/config"
 )
 
 /*

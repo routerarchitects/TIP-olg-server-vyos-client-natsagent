@@ -5,7 +5,7 @@ set -euo pipefail
 #
 # Proves:
 # - starts a real nats-server with JetStream enabled
-# - starts a controller client using nats-agent-core
+# - starts a controller client using olg-nats-agent-core
 # - starts vyos-nats-agent against the same NATS server
 # - submits configure and expects success result
 # - verifies state file contains applied_uuid
@@ -181,8 +181,8 @@ import (
 	"os"
 	"time"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/config"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/config"
 )
 
 const wireVersion = "1.0"

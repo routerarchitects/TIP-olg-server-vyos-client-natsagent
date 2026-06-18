@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/renderer"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/renderer"
 )
 
 // Placeholder is a no-op apply engine for Phase 3 workflow checks.

@@ -21,7 +21,7 @@ This phase is about proving the configure lifecycle:
 
 ```text
 Configure notification received
-  -> LoadDesiredConfig(ctx, target) using nats-agent-core
+  -> LoadDesiredConfig(ctx, target) using olg-nats-agent-core
   -> compare desired UUID with local applied UUID state
   -> render desired config using placeholder renderer
   -> apply rendered config using placeholder apply engine
@@ -73,7 +73,7 @@ until Phase 4.
 
 ## Hard Rules
 
-1. Use `github.com/routerarchitects/nats-agent-core/agentcore` as the only bus-facing library.
+1. Use `github.com/Telecominfraproject/olg-nats-agent-core/agentcore` as the only bus-facing library.
 2. Do not import `github.com/nats-io/nats.go` directly.
 3. Do not implement raw NATS publish/subscribe logic.
 4. Do not manually compose NATS subjects.
@@ -81,8 +81,8 @@ until Phase 4.
 6. Use `client.LoadDesiredConfig(ctx, target)` for loading desired config.
 7. Use `client.PublishStatus(ctx, ...)` for configure status.
 8. Use `client.PublishResult(ctx, ...)` for configure result.
-9. Do not duplicate `nats-agent-core` subject/session/KV/transport behavior.
-10. Do not call internal packages from `nats-agent-core`.
+9. Do not duplicate `olg-nats-agent-core` subject/session/KV/transport behavior.
+10. Do not call internal packages from `olg-nats-agent-core`.
 11. Do not implement real VyOS renderer repo integration.
 12. Do not implement real VyOS CLI/config command execution.
 13. Do not update local applied UUID state until placeholder apply succeeds.
@@ -602,10 +602,10 @@ The Phase 3 configure smoke should:
 
 ```text
 1. Start real nats-server -js.
-2. Start controller using nats-agent-core.
+2. Start controller using olg-nats-agent-core.
 3. Start vyos-nats-agent.
 4. Observe startup status.
-5. SubmitConfigure through nats-agent-core.
+5. SubmitConfigure through olg-nats-agent-core.
 6. Observe configure statuses.
 7. Observe final configure result:
    - result = success
@@ -846,5 +846,5 @@ Also explicitly confirm:
 - no real VyOS renderer was added
 - no real VyOS apply commands were added
 - action handler remains placeholder for Phase 4
-- nats-agent-core remains the only bus-facing implementation
+- olg-nats-agent-core remains the only bus-facing implementation
 ```

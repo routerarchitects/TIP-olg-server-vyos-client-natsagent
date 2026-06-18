@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/state"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/testutil"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/state"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/testutil"
 )
 
 /*

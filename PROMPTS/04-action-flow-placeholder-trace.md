@@ -78,15 +78,15 @@ The configure flow should remain Phase 3 behavior. Do not regress it.
 
 ## Hard Rules
 
-1. Use `github.com/routerarchitects/nats-agent-core/agentcore` as the only bus-facing library.
+1. Use `github.com/Telecominfraproject/olg-nats-agent-core/agentcore` as the only bus-facing library.
 2. Do not import `github.com/nats-io/nats.go` directly.
 3. Do not implement raw NATS publish/subscribe logic.
 4. Do not manually compose NATS subjects.
 5. Do not implement custom KV logic.
 6. Use `client.PublishStatus(ctx, ...)` for action status.
 7. Use `client.PublishResult(ctx, ...)` for action result.
-8. Do not duplicate `nats-agent-core` subject/session/transport behavior.
-9. Do not call internal packages from `nats-agent-core`.
+8. Do not duplicate `olg-nats-agent-core` subject/session/transport behavior.
+9. Do not call internal packages from `olg-nats-agent-core`.
 10. Do not implement real VyOS trace.
 11. Do not implement rtty.
 12. Do not execute shell commands.
@@ -553,10 +553,10 @@ The smoke script should:
 
 ```text
 1. Start real nats-server -js.
-2. Start controller using nats-agent-core.
+2. Start controller using olg-nats-agent-core.
 3. Start vyos-nats-agent.
 4. Observe startup status.
-5. SubmitAction for trace through nats-agent-core.
+5. SubmitAction for trace through olg-nats-agent-core.
 6. Observe action statuses.
 7. Observe final action result:
    - result = success
@@ -573,7 +573,7 @@ Important:
 
 ```text
 - Do not use raw NATS publish for the primary test flow.
-- Controller must use public nats-agent-core APIs.
+- Controller must use public olg-nats-agent-core APIs.
 - Do not kill existing nats-server by default.
 - If port is busy, fail with message suggesting NATS_PORT=4223.
 - Only kill existing NATS if explicitly requested by env var.
@@ -743,5 +743,5 @@ Also explicitly confirm:
 - no real VyOS trace was added
 - no shell command execution was added
 - configure flow remains Phase 3 behavior
-- nats-agent-core remains the only bus-facing implementation
+- olg-nats-agent-core remains the only bus-facing implementation
 ```

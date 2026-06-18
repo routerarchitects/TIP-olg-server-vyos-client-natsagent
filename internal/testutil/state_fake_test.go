@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/state"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/state"
 )
 
 /*

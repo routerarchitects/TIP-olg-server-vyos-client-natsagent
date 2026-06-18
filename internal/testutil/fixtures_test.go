@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/renderervyos"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/renderervyos"
 )
 
 /*

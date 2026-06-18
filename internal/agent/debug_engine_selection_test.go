@@ -3,11 +3,11 @@ package agent
 import (
 	"testing"
 
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/apply"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/applyvyos"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/config"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/renderer"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/renderervyos"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/apply"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/applyvyos"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/config"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/renderer"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/renderervyos"
 )
 
 /*

@@ -30,7 +30,7 @@ It should use:
 
 ```text
 real NATS / JetStream / KV path where practical
-real nats-agent-core integration path
+real olg-nats-agent-core integration path
 real handler registration / subject routing path where practical
 fake renderer / fake apply backend / fake action executor
 temporary local state
@@ -478,7 +478,7 @@ agent startup returns clear error
 test does not hang
 ```
 
-If connection lifecycle belongs to nats-agent-core or broader runtime/lifecycle testing, document as deferred with reason.
+If connection lifecycle belongs to olg-nats-agent-core or broader runtime/lifecycle testing, document as deferred with reason.
 
 Do not create flaky connection tests.
 
@@ -573,7 +573,7 @@ Keep changes minimal.
 
 Do not implement real VyOS behavior.
 
-Do not redesign nats-agent-core contracts from this repo.
+Do not redesign olg-nats-agent-core contracts from this repo.
 
 ## Commands To Run
 

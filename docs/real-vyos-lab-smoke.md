@@ -192,5 +192,5 @@ the payload you applied.
 - The agent binary does not directly execute raw VyOS commands. In real mode it
   calls the public `olg-renderer-vyos/renderer` and `olg-renderer-vyos/apply`
   APIs.
-- `nats-agent-core` and `olg-renderer-vyos` are resolved through normal Go
+- `olg-nats-agent-core` and `olg-renderer-vyos` are resolved through normal Go
   module dependency management.

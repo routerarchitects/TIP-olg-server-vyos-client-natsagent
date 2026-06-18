@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
-	vyosrenderer "github.com/routerarchitects/olg-renderer-vyos/renderer"
-	internalrenderer "github.com/routerarchitects/olg-server-vyos-client-natagent/internal/renderer"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
+	vyosrenderer "github.com/Telecominfraproject/olg-renderer-vyos/renderer"
+	internalrenderer "github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/renderer"
 )
 
 type adapterBoundaryRendererBackend struct {

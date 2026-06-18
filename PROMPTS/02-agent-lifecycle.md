@@ -1,6 +1,6 @@
 # PROMPTS/02-agent-lifecycle.md
 
-# Phase 2: Agent Lifecycle Using nats-agent-core
+# Phase 2: Agent Lifecycle Using olg-nats-agent-core
 
 ## Objective
 
@@ -15,7 +15,7 @@ Read the current repository carefully before editing:
 
 Implement **Phase 2** of `vyos-nats-agent`.
 
-This phase wires the Phase 1 YAML config loader into a minimal long-running daemon lifecycle using only the public `github.com/routerarchitects/nats-agent-core/agentcore` API.
+This phase wires the Phase 1 YAML config loader into a minimal long-running daemon lifecycle using only the public `github.com/Telecominfraproject/olg-nats-agent-core/agentcore` API.
 
 This phase is about:
 
@@ -33,7 +33,7 @@ config.yaml
 
 Do **not** implement configure apply, desired-config loading, renderer integration, apply engine, local state, startup reconcile, real action execution, or integration tests in this phase.
 
-The goal is to prove that the VyOS agent can start, connect to the NATS bus through `nats-agent-core`, register handlers, publish startup status, and shut down cleanly.
+The goal is to prove that the VyOS agent can start, connect to the NATS bus through `olg-nats-agent-core`, register handlers, publish startup status, and shut down cleanly.
 
 ---
 
@@ -65,14 +65,14 @@ When `--validate-config` is not used, the process should start the Phase 2 agent
 
 ## Hard Rules
 
-1. Use `github.com/routerarchitects/nats-agent-core/agentcore` as the only NATS lifecycle, subscription, publish, status, and handler-registration library.
+1. Use `github.com/Telecominfraproject/olg-nats-agent-core/agentcore` as the only NATS lifecycle, subscription, publish, status, and handler-registration library.
 2. Do not import `github.com/nats-io/nats.go` directly in this agent.
 3. Do not implement raw NATS connection logic.
 4. Do not implement raw NATS publish/subscribe logic.
 5. Do not construct raw NATS subjects manually.
 6. Do not implement custom KV access.
-7. Do not duplicate any `nats-agent-core` subject, session, transport, or registry logic.
-8. Do not call internal packages from `nats-agent-core`.
+7. Do not duplicate any `olg-nats-agent-core` subject, session, transport, or registry logic.
+8. Do not call internal packages from `olg-nats-agent-core`.
 9. Use only the public `agentcore` package.
 10. Keep handlers thin.
 11. Do not implement real VyOS rendering or config apply.
@@ -83,7 +83,7 @@ When `--validate-config` is not used, the process should start the Phase 2 agent
 
 ---
 
-## Relevant nats-agent-core Public API
+## Relevant olg-nats-agent-core Public API
 
 Use the public `agentcore` APIs already available from the library:
 
@@ -102,7 +102,7 @@ agentcore.WithErrorSink(func(error))
 
 Do not use raw NATS APIs for any of this.
 
-The `nats-agent-core` library is not a daemon. It is meant to be used inside long-running agents. The VyOS agent owns daemon lifecycle and local business behavior, while the library owns bus-facing behavior.
+The `olg-nats-agent-core` library is not a daemon. It is meant to be used inside long-running agents. The VyOS agent owns daemon lifecycle and local business behavior, while the library owns bus-facing behavior.
 
 ---
 
@@ -856,5 +856,5 @@ Also explicitly confirm:
 - no custom subject building was added
 - no custom KV code was added
 - no renderer/apply/state/action execution was added
-- nats-agent-core remains the only bus-facing implementation
+- olg-nats-agent-core remains the only bus-facing implementation
 ```

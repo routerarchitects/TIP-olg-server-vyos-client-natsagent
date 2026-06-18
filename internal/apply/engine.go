@@ -3,7 +3,7 @@ package apply
 import (
 	"context"
 
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/renderer"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/renderer"
 )
 
 // Engine applies rendered config for a target.

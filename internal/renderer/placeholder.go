@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
 )
 
 // Placeholder is a deterministic mock renderer for Phase 3.

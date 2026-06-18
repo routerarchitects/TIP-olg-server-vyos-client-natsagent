@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	vyosapply "github.com/routerarchitects/olg-renderer-vyos/apply"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/renderer"
+	vyosapply "github.com/Telecominfraproject/olg-renderer-vyos/apply"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/renderer"
 )
 
 type fakeApplyBackend struct {

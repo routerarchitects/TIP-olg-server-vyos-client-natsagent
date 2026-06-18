@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
 )
 
 func (r *Runtime) registerHandlers() error {

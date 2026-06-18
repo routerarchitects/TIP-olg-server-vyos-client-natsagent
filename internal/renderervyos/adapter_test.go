@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
-	vyosrenderer "github.com/routerarchitects/olg-renderer-vyos/renderer"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/testutil"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
+	vyosrenderer "github.com/Telecominfraproject/olg-renderer-vyos/renderer"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/testutil"
 )
 
 type fakeRendererBackend struct {

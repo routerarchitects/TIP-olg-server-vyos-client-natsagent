@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/actions"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/testutil"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/actions"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/testutil"
 )
 
 /*

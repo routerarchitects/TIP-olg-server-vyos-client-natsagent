@@ -1,6 +1,6 @@
 # olg-server-vyos-client-natsagent
 
-`vyos-nats-agent` is a Go daemon that runs inside or near the VyOS environment and uses `nats-agent-core` for NATS, JetStream KV, command handling, and result/status publishing.
+`vyos-nats-agent` is a Go daemon that runs inside or near the VyOS environment and uses `olg-nats-agent-core` for NATS, JetStream KV, command handling, and result/status publishing.
 
 The default mode is intentionally safe for CI and local development: configure uses placeholder VyOS renderer/apply logic unless real mode is selected explicitly.
 
@@ -8,14 +8,14 @@ The default mode is intentionally safe for CI and local development: configure u
 
 - Loads runtime settings from `config.yaml`.
 - Builds `agentcore.Config` from that YAML configuration.
-- Connects to NATS through `nats-agent-core`.
+- Connects to NATS through `olg-nats-agent-core`.
 - Registers a configure handler for target `vyos`.
 - Registers an initial action handler for `trace`.
 - Receives configure notifications from `cmd.configure.vyos`.
 - Loads desired configuration from JetStream KV.
 - Sends the desired payload through the selected configure backend.
 - Supports `placeholder` configure mode for CI/local non-VyOS runs.
-- Supports `real` configure mode using `github.com/routerarchitects/olg-renderer-vyos` renderer/apply APIs.
+- Supports `real` configure mode using `github.com/Telecominfraproject/olg-renderer-vyos` renderer/apply APIs.
 - Stores the last successfully applied config UUID locally.
 - Publishes placeholder action status/result for `trace`.
 - Publishes result and status messages to the bus.
@@ -107,8 +107,8 @@ agent:
 Core module dependencies are pinned to released tags:
 
 ```text
-github.com/routerarchitects/nats-agent-core v0.1.0
-github.com/routerarchitects/olg-renderer-vyos v0.1.0
+github.com/Telecominfraproject/olg-nats-agent-core v0.1.0
+github.com/Telecominfraproject/olg-renderer-vyos v0.1.0
 ```
 
 Validate real mode on a disposable or lab VyOS target before production rollout.
@@ -305,7 +305,7 @@ PR CI. See `tests/lab/README.md` before running it against a lab VM/device.
 
 The current binary supports:
 - validation-only mode with safe effective-config printing
-- long-running runtime mode using `nats-agent-core` (`Start`, handler registration, status publish, graceful `Close`)
+- long-running runtime mode using `olg-nats-agent-core` (`Start`, handler registration, status publish, graceful `Close`)
 - configure workflow using `LoadDesiredConfig(ctx, target)`, selected configure backend mode, and local applied UUID state updates after successful apply
 - action workflow for `trace` using a placeholder executor, with action status/result publishing
 
@@ -367,6 +367,6 @@ go run ./cmd/vyos-nats-agent \
 
 ## Design principle
 
-`nats-agent-core` handles bus-facing behavior. `vyos-nats-agent` handles VyOS-specific orchestration.
+`olg-nats-agent-core` handles bus-facing behavior. `vyos-nats-agent` handles VyOS-specific orchestration.
 
 Real VyOS behavior stays behind interfaces and adapters so placeholder mode remains available without changing the NATS lifecycle.

@@ -4,8 +4,8 @@ import (
 	"context"
 	"sync"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/renderer"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/renderer"
 )
 
 // FakeRenderer is a controllable renderer test double for configure tests.

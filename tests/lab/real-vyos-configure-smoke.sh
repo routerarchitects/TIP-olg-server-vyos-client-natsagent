@@ -291,8 +291,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/config"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/config"
 )
 
 const wireVersion = "1.0"

@@ -3,7 +3,7 @@ package renderer
 import (
 	"context"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
 )
 
 // Output is rendered configure content for apply.

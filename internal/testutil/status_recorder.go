@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
 )
 
 // StatusRecorder captures status envelopes in publish order.

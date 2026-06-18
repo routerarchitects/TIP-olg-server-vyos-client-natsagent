@@ -16,7 +16,7 @@ config.yaml
   -> apply defaults
   -> validate required values
   -> parse duration strings
-  -> build agentcore.Config from github.com/routerarchitects/nats-agent-core/agentcore
+  -> build agentcore.Config from github.com/Telecominfraproject/olg-nats-agent-core/agentcore
 ```
 
 Do not implement daemon runtime, NATS connection startup, configure handling, action handling, renderer logic, apply logic, state store, or any message-processing lifecycle in this phase.
@@ -25,8 +25,8 @@ The output of this phase should be a clean Go project that can load and validate
 
 ## Hard Rules
 
-1. Use `github.com/routerarchitects/nats-agent-core/agentcore` as the only source of truth for NATS agent-core configuration types.
-2. Do not duplicate `nats-agent-core` behavior.
+1. Use `github.com/Telecominfraproject/olg-nats-agent-core/agentcore` as the only source of truth for NATS agent-core configuration types.
+2. Do not duplicate `olg-nats-agent-core` behavior.
 3. Do not implement custom NATS connection code.
 4. Do not implement custom subject-builder logic.
 5. Do not implement custom KV access logic.
@@ -41,7 +41,7 @@ The output of this phase should be a clean Go project that can load and validate
 Use:
 
 ```go
-github.com/routerarchitects/nats-agent-core
+github.com/Telecominfraproject/olg-nats-agent-core
 gopkg.in/yaml.v3
 ```
 
@@ -49,10 +49,10 @@ If `go.mod` does not exist, create it.
 
 Use the module path inferred from the repository remote or current repository name. Do not invent unrelated module paths.
 
-For local development, if the `nats-agent-core` repository exists as a sibling directory, it is acceptable to add a temporary local `replace` directive, for example:
+For local development, if the `olg-nats-agent-core` repository exists as a sibling directory, it is acceptable to add a temporary local `replace` directive, for example:
 
 ```go
-replace github.com/routerarchitects/nats-agent-core => ../nats-agent-core
+replace github.com/Telecominfraproject/olg-nats-agent-core => ../olg-nats-agent-core
 ```
 
 Do not vendor the library.

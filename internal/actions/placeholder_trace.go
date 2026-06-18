@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
 )
 
 type PlaceholderTraceExecutor struct{}

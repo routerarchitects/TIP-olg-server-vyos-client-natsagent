@@ -11,9 +11,9 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/agent"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/config"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/agent"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/config"
 )
 
 func main() {

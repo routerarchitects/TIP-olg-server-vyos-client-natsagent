@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/state"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/state"
 )
 
 // FakeStateStore is a controllable in-memory state store test double.

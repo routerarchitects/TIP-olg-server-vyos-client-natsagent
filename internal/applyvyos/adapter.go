@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/routerarchitects/nats-agent-core/agentcore"
-	vyosapply "github.com/routerarchitects/olg-renderer-vyos/apply"
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/renderer"
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
+	vyosapply "github.com/Telecominfraproject/olg-renderer-vyos/apply"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/renderer"
 )
 
 type Backend interface {

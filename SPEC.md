@@ -8,7 +8,7 @@ vyos-nats-agent
 
 ## 2. Goal
 
-Build a minimal VyOS-focused daemon that uses `nats-agent-core` for all NATS, JetStream KV, subject, handler, result, and status communication.
+Build a minimal VyOS-focused daemon that uses `olg-nats-agent-core` for all NATS, JetStream KV, subject, handler, result, and status communication.
 
 The safe default must prove an end-to-end configure/action lifecycle using:
 
@@ -18,13 +18,13 @@ The safe default must prove an end-to-end configure/action lifecycle using:
 - placeholder `trace` action executor
 - real NATS integration tests
 
-The agent can also run a real configure backend when explicitly configured. Real mode uses `github.com/routerarchitects/olg-renderer-vyos` renderer/apply public APIs and must be validated on disposable/lab VyOS targets before production rollout.
+The agent can also run a real configure backend when explicitly configured. Real mode uses `github.com/Telecominfraproject/olg-renderer-vyos` renderer/apply public APIs and must be validated on disposable/lab VyOS targets before production rollout.
 
 ## 3. Core architecture
 
 `vyos-nats-agent` is a daemon.
 
-`nats-agent-core` is a library embedded inside the daemon.
+`olg-nats-agent-core` is a library embedded inside the daemon.
 
 The agent owns:
 
@@ -839,7 +839,7 @@ Implement:
 - `agent.configure.mode: placeholder | real`
 - real renderer adapter using `olg-renderer-vyos/renderer`
 - real apply adapter using `olg-renderer-vyos/apply`
-- dependency on `nats-agent-core` module tag `v0.1.0`
+- dependency on `olg-nats-agent-core` module tag `v0.1.0`
 - dependency on `olg-renderer-vyos` module tag `v0.1.0`
 
 The core and renderer dependencies are resolved through normal Go module resolution.
@@ -851,7 +851,7 @@ Codex must follow these rules:
 - Work one phase at a time.
 - Do not generate future phase code early.
 - Do not hardcode config values.
-- Do not bypass `nats-agent-core`.
+- Do not bypass `olg-nats-agent-core`.
 - Do not use raw NATS APIs in production code.
 - Keep public APIs small.
 - Keep handlers thin.

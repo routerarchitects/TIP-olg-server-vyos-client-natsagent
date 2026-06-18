@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	vyosapply "github.com/routerarchitects/olg-renderer-vyos/apply"
+	vyosapply "github.com/Telecominfraproject/olg-renderer-vyos/apply"
 )
 
 // FakeApplyBackend is a controllable VyOS apply backend test double.

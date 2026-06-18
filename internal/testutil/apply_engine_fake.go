@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/routerarchitects/olg-server-vyos-client-natagent/internal/renderer"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/renderer"
 )
 
 // FakeApplyEngine is a controllable configure ApplyEngine test double.
