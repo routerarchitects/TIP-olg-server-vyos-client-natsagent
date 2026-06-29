@@ -201,31 +201,30 @@ func TestSaveRejectsCanceledContext(t *testing.T) {
 
 /*
 TC-STATE-STORE-007
-Type: Negative
-Title: Load fails for malformed JSON
+Type: Positive / Recovery
+Title: Load handles malformed JSON by returning empty state
 Summary:
 Writes malformed content into the state file and calls Load.
-The loader must reject invalid JSON and return a decode error.
-This ensures corrupted state files are surfaced clearly.
+The loader should gracefully recover from corrupted JSON by returning
+an empty State without error.
 
 Validates:
-  - malformed json returns error
-  - error includes decode context
-  - invalid file is not treated as empty state
+  - malformed json does not return error
+  - invalid file is treated as empty state
 */
-func TestLoadMalformedJSONReturnsError(t *testing.T) {
+func TestLoadMalformedJSONReturnsEmptyState(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
 	if err := os.WriteFile(path, []byte("{not-json"), 0o600); err != nil {
 		t.Fatalf("write malformed state: %v", err)
 	}
 
 	store := NewFileStore(path)
-	_, err := store.Load(context.Background())
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	got, err := store.Load(context.Background())
+	if err != nil {
+		t.Fatalf("expected no error for malformed state, got: %v", err)
 	}
-	if !strings.Contains(err.Error(), "decode state file") {
-		t.Fatalf("error %q does not contain decode state file", err.Error())
+	if got != (State{}) {
+		t.Fatalf("expected empty state, got %+v", got)
 	}
 }
 

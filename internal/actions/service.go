@@ -8,10 +8,7 @@ import (
 	"time"
 
 	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
-)
-
-const (
-	wireVersion = "1.0"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/wire"
 )
 
 type Service struct {
@@ -111,17 +108,18 @@ func (s *Service) Handle(ctx context.Context, msg agentcore.ActionCommand) error
 	}
 
 	s.logInfo("action result publishing", "target", msg.Target, "action", msg.Action, "rpc_id", msg.RPCID, "status", "success")
-	if err := s.client.PublishResult(ctx, agentcore.ResultEnvelope{
-		Version:     wireVersion,
-		RPCID:       msg.RPCID,
-		Target:      msg.Target,
-		CommandType: "action",
-		Action:      msg.Action,
-		Result:      "success",
-		Message:     output.Message,
-		Payload:     output.Payload,
-		Timestamp:   s.now().UTC(),
-	}); err != nil {
+	if err := s.client.PublishResult(ctx, wire.BuildResult(
+		msg.RPCID,
+		msg.Target,
+		"action",
+		"",
+		msg.Action,
+		"success",
+		"",
+		output.Message,
+		output.Payload,
+		s.now().UTC(),
+	)); err != nil {
 		return s.fail(ctx, msg, "result_publish_failed", "failed to publish action result", fmt.Errorf("publish action success result: %w", err))
 	}
 	s.logInfo("action result published", "target", msg.Target, "action", msg.Action, "rpc_id", msg.RPCID, "status", "success")
@@ -138,17 +136,18 @@ func (s *Service) fail(ctx context.Context, msg agentcore.ActionCommand, code, s
 	}
 
 	var resultErr error
-	if err := s.client.PublishResult(ctx, agentcore.ResultEnvelope{
-		Version:     wireVersion,
-		RPCID:       msg.RPCID,
-		Target:      msg.Target,
-		CommandType: "action",
-		Action:      msg.Action,
-		Result:      "failure",
-		ErrorCode:   code,
-		Message:     safeMessage,
-		Timestamp:   s.now().UTC(),
-	}); err != nil {
+	if err := s.client.PublishResult(ctx, wire.BuildResult(
+		msg.RPCID,
+		msg.Target,
+		"action",
+		"",
+		msg.Action,
+		"failure",
+		code,
+		safeMessage,
+		nil,
+		s.now().UTC(),
+	)); err != nil {
 		resultErr = fmt.Errorf("publish action failure result: %w", err)
 	}
 
@@ -156,15 +155,15 @@ func (s *Service) fail(ctx context.Context, msg agentcore.ActionCommand, code, s
 }
 
 func (s *Service) publishStatus(ctx context.Context, msg agentcore.ActionCommand, status, stage, message string) error {
-	return s.client.PublishStatus(ctx, agentcore.StatusEnvelope{
-		Version:   wireVersion,
-		RPCID:     msg.RPCID,
-		Target:    msg.Target,
-		Status:    status,
-		Stage:     stage,
-		Message:   message,
-		Timestamp: s.now().UTC(),
-	})
+	return s.client.PublishStatus(ctx, wire.BuildStatus(
+		msg.RPCID,
+		msg.Target,
+		"",
+		status,
+		stage,
+		message,
+		s.now().UTC(),
+	))
 }
 
 func (s *Service) logInfo(msg string, kv ...any) {

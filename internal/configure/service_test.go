@@ -298,7 +298,7 @@ func TestHandleAlreadyInSync(t *testing.T) {
 	msg := agentcore.ConfigureNotification{Version: "1.0", RPCID: "rpc-2", Target: "vyos", UUID: "cfg-2"}
 
 	client := &fakeConfigureClient{desired: newDesired("vyos", "cfg-2")}
-	store := &fakeStateStore{loadState: state.State{AppliedUUID: "cfg-2"}}
+	store := &fakeStateStore{loadState: state.State{Target: "vyos", AppliedUUID: "cfg-2"}}
 	rndr := &fakeRenderer{}
 	apply := &fakeApplyEngine{}
 	svc := newConfigureServiceForTest(t, client, store, rndr, apply, time.Now)
@@ -1018,7 +1018,7 @@ func TestHandleAlreadyInSyncPublishFailure(t *testing.T) {
 		desired:          newDesired("vyos", "cfg-sync-fail"),
 		statusErrByStage: map[string]error{"already_in_sync": errors.New("publish already_in_sync status failed")},
 	}
-	store := &fakeStateStore{loadState: state.State{AppliedUUID: "cfg-sync-fail"}}
+	store := &fakeStateStore{loadState: state.State{Target: "vyos", AppliedUUID: "cfg-sync-fail"}}
 	rndr := &fakeRenderer{}
 	apply := &fakeApplyEngine{}
 	svc := newConfigureServiceForTest(t, client, store, rndr, apply, time.Now)

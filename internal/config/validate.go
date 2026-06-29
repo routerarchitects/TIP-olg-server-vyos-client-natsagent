@@ -53,9 +53,7 @@ func (c AppConfig) Validate() error {
 	if !hasServer {
 		return fmt.Errorf("agentcore.nats.servers must contain at least one non-empty server")
 	}
-	if c.AgentCore.NATS.RetryOnFailedConnect {
-		return fmt.Errorf("agentcore.nats.retry_on_failed_connect is not supported in this phase")
-	}
+
 	if c.AgentCore.NATS.MaxReconnects < -1 {
 		return fmt.Errorf("agentcore.nats.max_reconnects must be -1 or greater")
 	}

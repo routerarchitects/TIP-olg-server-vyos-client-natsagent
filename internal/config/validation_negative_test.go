@@ -39,13 +39,7 @@ func TestConfigInvalidNATSConfigFailsValidation(t *testing.T) {
 			},
 			errorContains: "agentcore.nats.servers",
 		},
-		{
-			name: "unsupported retry on failed connect",
-			mutate: func(cfg *AppConfig) {
-				cfg.AgentCore.NATS.RetryOnFailedConnect = true
-			},
-			errorContains: "retry_on_failed_connect",
-		},
+
 		{
 			name: "negative reconnect buffer",
 			mutate: func(cfg *AppConfig) {

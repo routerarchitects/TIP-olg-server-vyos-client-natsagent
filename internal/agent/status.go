@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/wire"
 )
 
 func (r *Runtime) publishStartupStatus(ctx context.Context) error {
@@ -15,14 +15,15 @@ func (r *Runtime) publishStartupStatus(ctx context.Context) error {
 		"status", "running",
 	)
 
-	msg := agentcore.StatusEnvelope{
-		Version:   wireVersion,
-		Target:    r.appConfig.Agent.Target,
-		Status:    "running",
-		Stage:     "startup",
-		Message:   "vyos-nats-agent started",
-		Timestamp: r.now().UTC(),
-	}
+	msg := wire.BuildStatus(
+		"",
+		r.appConfig.Agent.Target,
+		"",
+		"running",
+		"startup",
+		"vyos-nats-agent started",
+		r.now().UTC(),
+	)
 	publishCtx, cancel := context.WithTimeout(context.Background(), startupCloseTimeout)
 	defer cancel()
 	if err := r.client.PublishStatus(publishCtx, msg); err != nil {

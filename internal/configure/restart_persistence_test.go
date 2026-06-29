@@ -93,17 +93,17 @@ func TestRestartWithMissingStateReappliesConfig(t *testing.T) {
 
 /*
 TC-RESTART-003
-Type: Negative
-Title: Restart with corrupt state fails safely
+Type: Recovery
+Title: Restart with corrupt state recovers gracefully and applies config
 Summary:
 Writes malformed JSON to the state path and starts configure processing.
-The corrupt state must not be trusted and the service should stop before
-render/apply/save side effects.
+The corrupt state should be ignored, and the service should fall back to
+an empty state, allowing it to render/apply/save successfully.
 
 Validates:
-  - corrupt state returns state_load_failed
-  - renderer/apply are not called
-  - no new checkpoint is saved
+  - corrupt state is ignored (no failure result)
+  - renderer/apply are called exactly once
+  - new checkpoint is successfully saved
 */
 func TestRestartWithCorruptStateFailsSafely(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.json")
@@ -113,18 +113,18 @@ func TestRestartWithCorruptStateFailsSafely(t *testing.T) {
 	fixture := newRestartConfigureFixture(t, path, testutil.MinimalTarget, "cfg-restart-corrupt")
 
 	err := fixture.service.Handle(context.Background(), fixture.msg)
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	if err != nil {
+		t.Fatalf("expected nil error, got: %v", err)
 	}
-	if fixture.renderer.Calls() != 0 || fixture.apply.Calls() != 0 {
-		t.Fatalf("side effects got renderer=%d apply=%d want 0", fixture.renderer.Calls(), fixture.apply.Calls())
+	if fixture.renderer.Calls() != 1 || fixture.apply.Calls() != 1 {
+		t.Fatalf("side effects got renderer=%d apply=%d want 1/1", fixture.renderer.Calls(), fixture.apply.Calls())
 	}
-	result, ok := fixture.client.LastResult()
-	if !ok {
-		t.Fatal("expected failure result")
+	loaded, err := state.NewFileStore(path).Load(context.Background())
+	if err != nil {
+		t.Fatalf("load saved state: %v", err)
 	}
-	if result.ErrorCode != "state_load_failed" {
-		t.Fatalf("error_code got=%q want=state_load_failed", result.ErrorCode)
+	if loaded.AppliedUUID != fixture.msg.UUID {
+		t.Fatalf("applied_uuid got=%q want=%q", loaded.AppliedUUID, fixture.msg.UUID)
 	}
 }
 

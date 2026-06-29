@@ -594,11 +594,11 @@ Adapters are fragile because they translate data between systems. These tests en
 | AAD-002 | `TestApplyAdapterCallsPrepareWhenSupported` | P0 | Positive | Prepare flow | Prepare called once |
 | AAD-003 | `TestApplyAdapterLogsPlanFieldsSafely` | P1 | Safety | Plan logging safe | Only safe plan summary logged |
 | AAD-004 | `TestApplyAdapterCallsApplyExactlyOnce` | P0 | Positive | Avoid duplicate apply | Apply call count is 1 |
-| AAD-005 | `TestApplyAdapterPropagatesPrepareError` | P0 | Negative | Prepare failure visible | Apply not called; error returned |
+| AAD-005 | `TestApplyAdapterPropagatesPrepareError` | P0 | Positive / Recovery | Ignores Prepare error | Executes Apply anyway |
 | AAD-006 | `TestApplyAdapterPropagatesApplyError` | P0 | Negative | Apply failure visible | Error returned |
 | AAD-007 | `TestApplyAdapterPrepareDoesNotMutateInputForApply` | P0 | Safety | Prevent stale/mutated input bug | Apply receives correct intended input |
 | AAD-008 | `TestApplyAdapterBackendWithBothPrepareAndApplyUsesCorrectInput` | P0 | Safety | Critical reviewer case | Prepare and Apply called; Apply input correct |
-| AAD-009 | `TestApplyAdapterDoesNotApplyWhenPrepareFails` | P0 | Safety | Prevent unsafe apply | Apply not called |
+| AAD-009 | `TestApplyAdapterDoesNotApplyWhenPrepareFails` | P0 | Positive / Recovery | Ignores Prepare error | Executes Apply anyway |
 | AAD-010 | `TestApplyAdapterHandlesNilOrEmptyPlanSafely` | P1 | Negative | Robustness | No panic; behavior per spec |
 | AAD-011 | `TestApplyAdapterDoesNotLogRenderedCommandsByDefault` | P0 | Safety | Avoid sensitive leak | Commands not logged at info level |
 

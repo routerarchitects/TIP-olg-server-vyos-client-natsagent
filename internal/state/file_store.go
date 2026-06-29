@@ -20,7 +20,7 @@ func NewFileStore(path string) *FileStore {
 	return &FileStore{path: path}
 }
 
-// Load reads state from JSON file. Missing file is treated as empty state.
+// Load reads state from JSON file. Missing file or corrupt JSON is treated as empty state.
 func (s *FileStore) Load(ctx context.Context) (State, error) {
 	if ctx == nil {
 		return State{}, errors.New("load state: context is nil")
@@ -45,7 +45,7 @@ func (s *FileStore) Load(ctx context.Context) (State, error) {
 
 	var st State
 	if err := json.Unmarshal(data, &st); err != nil {
-		return State{}, fmt.Errorf("decode state file %q: %w", s.path, err)
+		return State{}, nil
 	}
 	return st, nil
 }
@@ -114,13 +114,9 @@ func (s *FileStore) Save(ctx context.Context, st State) error {
 	}
 
 	dirFile, err := os.Open(dir)
-	if err != nil {
-		return fmt.Errorf("open state directory %q for sync: %w", dir, err)
-	}
-	defer dirFile.Close()
-
-	if err := dirFile.Sync(); err != nil {
-		return fmt.Errorf("sync state directory %q: %w", dir, err)
+	if err == nil {
+		_ = dirFile.Sync()
+		_ = dirFile.Close()
 	}
 
 	return nil

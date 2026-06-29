@@ -16,10 +16,6 @@ import (
 	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/state"
 )
 
-const (
-	wireVersion = "1.0"
-)
-
 // Runtime owns agent lifecycle wiring around an agentcore client and delegates configure/action handling.
 type Runtime struct {
 	appConfig  *config.AppConfig

@@ -129,6 +129,7 @@ Validates:
 */
 func TestConfigureWorkflowAlreadyInSyncSkipsApply(t *testing.T) {
 	fixture := newPhase3WorkflowFixture(t, "cfg-phase3-sync")
+	fixture.store.Current.Target = fixture.msg.Target
 	fixture.store.Current.AppliedUUID = fixture.msg.UUID
 
 	if err := fixture.service.Handle(context.Background(), fixture.msg); err != nil {

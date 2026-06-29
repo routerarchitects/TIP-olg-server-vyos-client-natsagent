@@ -10,10 +10,7 @@ import (
 
 	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
 	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/state"
-)
-
-const (
-	wireVersion = "1.0"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/wire"
 )
 
 type Service struct {
@@ -138,7 +135,7 @@ func (s *Service) Handle(ctx context.Context, msg agentcore.ConfigureNotificatio
 	}
 	s.logInfo("configure state loaded", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID)
 
-	if localState.AppliedUUID == desired.Record.UUID {
+	if localState.Target == msg.Target && localState.AppliedUUID == desired.Record.UUID {
 		s.logInfo("configure already in sync", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "stage", "already_in_sync", "status", "success")
 		statusErr := s.publishStatus(ctx, msg, "success", "already_in_sync", "desired config already applied")
 		resultErr := s.publishSuccessResult(ctx, msg, "desired config already applied")
@@ -252,43 +249,45 @@ func publishSuccessResultErr(err error) error {
 }
 
 func (s *Service) publishStatus(ctx context.Context, msg agentcore.ConfigureNotification, status, stage, message string) error {
-	return s.client.PublishStatus(ctx, agentcore.StatusEnvelope{
-		Version:   wireVersion,
-		RPCID:     msg.RPCID,
-		Target:    msg.Target,
-		UUID:      msg.UUID,
-		Status:    status,
-		Stage:     stage,
-		Message:   message,
-		Timestamp: s.now().UTC(),
-	})
+	return s.client.PublishStatus(ctx, wire.BuildStatus(
+		msg.RPCID,
+		msg.Target,
+		msg.UUID,
+		status,
+		stage,
+		message,
+		s.now().UTC(),
+	))
 }
 
 func (s *Service) publishSuccessResult(ctx context.Context, msg agentcore.ConfigureNotification, message string) error {
-	return s.client.PublishResult(ctx, agentcore.ResultEnvelope{
-		Version:     wireVersion,
-		RPCID:       msg.RPCID,
-		Target:      msg.Target,
-		CommandType: "configure",
-		UUID:        msg.UUID,
-		Result:      "success",
-		Message:     message,
-		Timestamp:   s.now().UTC(),
-	})
+	return s.client.PublishResult(ctx, wire.BuildResult(
+		msg.RPCID,
+		msg.Target,
+		"configure",
+		msg.UUID,
+		"",
+		"success",
+		"",
+		message,
+		nil,
+		s.now().UTC(),
+	))
 }
 
 func (s *Service) publishFailureResult(ctx context.Context, msg agentcore.ConfigureNotification, code, message string) error {
-	return s.client.PublishResult(ctx, agentcore.ResultEnvelope{
-		Version:     wireVersion,
-		RPCID:       msg.RPCID,
-		Target:      msg.Target,
-		CommandType: "configure",
-		UUID:        msg.UUID,
-		Result:      "failure",
-		ErrorCode:   code,
-		Message:     message,
-		Timestamp:   s.now().UTC(),
-	})
+	return s.client.PublishResult(ctx, wire.BuildResult(
+		msg.RPCID,
+		msg.Target,
+		"configure",
+		msg.UUID,
+		"",
+		"failure",
+		code,
+		message,
+		nil,
+		s.now().UTC(),
+	))
 }
 
 func (s *Service) logInfo(msg string, kv ...any) {

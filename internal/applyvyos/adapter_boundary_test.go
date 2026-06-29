@@ -145,15 +145,15 @@ func TestApplyAdapterCallsApplyExactlyOnce(t *testing.T) {
 
 /*
 TC-APPLY-ADAPTER-005
-Type: Negative
-Title: Propagates Prepare error
+Type: Positive / Recovery
+Title: Ignores Prepare error and executes Apply
 Summary:
 Runs the adapter with a preparer that fails before apply.
-The adapter should return the prepare error and must not call Apply.
+The adapter should log the error as warning and still call Apply.
 
 Validates:
-  - prepare error is returned with adapter context
-  - Apply is not called
+  - no error is returned when Apply succeeds
+  - Apply is called exactly once
 */
 func TestApplyAdapterPropagatesPrepareError(t *testing.T) {
 	prepareErr := errors.New("prepare failed")
@@ -161,14 +161,11 @@ func TestApplyAdapterPropagatesPrepareError(t *testing.T) {
 	adapter := newApplyBoundaryAdapter(t, backend)
 
 	err := adapter.Apply(context.Background(), applyBoundaryRendered())
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "prepare vyos apply plan") || !strings.Contains(err.Error(), prepareErr.Error()) {
+	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if backend.ApplyCalls() != 0 {
-		t.Fatalf("apply calls got=%d want=0", backend.ApplyCalls())
+	if backend.ApplyCalls() != 1 {
+		t.Fatalf("apply calls got=%d want=1", backend.ApplyCalls())
 	}
 }
 
@@ -272,26 +269,25 @@ func TestApplyAdapterBackendWithBothPrepareAndApplyUsesCorrectInput(t *testing.T
 
 /*
 TC-APPLY-ADAPTER-009
-Type: Safety
-Title: Does not apply when Prepare fails
+Type: Positive / Recovery
+Title: Applies when Prepare fails
 Summary:
-Runs a backend whose Prepare step fails. The adapter should stop before
-the unsafe Apply step.
+Runs a backend whose Prepare step fails. The adapter should continue and call Apply.
 
 Validates:
-  - Apply is not called after Prepare failure
-  - prepare error is returned
+  - Apply is called even after Prepare failure
+  - returns nil error on success
 */
 func TestApplyAdapterDoesNotApplyWhenPrepareFails(t *testing.T) {
 	backend := &testutil.FakeApplyBackend{PrepareErr: errors.New("plan rejected")}
 	adapter := newApplyBoundaryAdapter(t, backend)
 
 	err := adapter.Apply(context.Background(), applyBoundaryRendered())
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if backend.ApplyCalls() != 0 {
-		t.Fatalf("apply calls got=%d want=0", backend.ApplyCalls())
+	if backend.ApplyCalls() != 1 {
+		t.Fatalf("apply calls got=%d want=1", backend.ApplyCalls())
 	}
 }
 

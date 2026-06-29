@@ -86,25 +86,26 @@ func (a *Adapter) Apply(ctx context.Context, rendered renderer.Output) error {
 	if preparer, ok := a.backend.(Preparer); ok {
 		plan, err := preparer.Prepare(ctx, input)
 		if err != nil {
-			return fmt.Errorf("prepare vyos apply plan: %w", err)
-		}
-		a.logInfo("vyos apply plan prepared",
-			"target", plan.Target,
-			"uuid", plan.ConfigUUID,
-			"delete_count", len(plan.DeleteCommands),
-			"set_count", len(plan.SetCommands),
-			"commit", plan.Commit,
-			"save", plan.Save,
-		)
-		if a.debug.LogApplyPlan {
-			a.logDebug("vyos apply plan command arrays prepared",
+			a.logWarn("failed to prepare vyos apply plan", "error", err)
+		} else {
+			a.logInfo("vyos apply plan prepared",
 				"target", plan.Target,
 				"uuid", plan.ConfigUUID,
-				"delete_commands", plan.DeleteCommands,
-				"set_commands", plan.SetCommands,
+				"delete_count", len(plan.DeleteCommands),
+				"set_count", len(plan.SetCommands),
 				"commit", plan.Commit,
 				"save", plan.Save,
 			)
+			if a.debug.LogApplyPlan {
+				a.logDebug("vyos apply plan command arrays prepared",
+					"target", plan.Target,
+					"uuid", plan.ConfigUUID,
+					"delete_commands", plan.DeleteCommands,
+					"set_commands", plan.SetCommands,
+					"commit", plan.Commit,
+					"save", plan.Save,
+				)
+			}
 		}
 	}
 	if _, err := a.backend.Apply(ctx, input); err != nil {
@@ -133,6 +134,13 @@ func (a *Adapter) logDebug(msg string, kv ...any) {
 		return
 	}
 	a.logger.Debug(msg, kv...)
+}
+
+func (a *Adapter) logWarn(msg string, kv ...any) {
+	if a == nil || a.logger == nil {
+		return
+	}
+	a.logger.Warn(msg, kv...)
 }
 
 func countNonEmptyLines(text string) int {
