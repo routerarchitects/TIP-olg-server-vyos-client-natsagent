@@ -100,12 +100,12 @@ func (s *Service) Handle(ctx context.Context, msg agentcore.ConfigureNotificatio
 	}
 
 	if err := s.publishStatus(ctx, msg, "running", "received", "configure notification received"); err != nil {
-		return s.fail(ctx, msg, "status_publish_failed", "configure processing failed", fmt.Errorf("publish configure status received: %w", err))
+		s.logWarn("failed to publish configure status", "stage", "received", "error", err)
 	}
 
 	s.logInfo("configure desired loading", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "stage", "loading_desired")
 	if err := s.publishStatus(ctx, msg, "running", "loading_desired", "loading desired config"); err != nil {
-		return s.fail(ctx, msg, "status_publish_failed", "configure processing failed", fmt.Errorf("publish configure status loading_desired: %w", err))
+		s.logWarn("failed to publish configure status", "stage", "loading_desired", "error", err)
 	}
 
 	desired, err := s.client.LoadDesiredConfig(ctx, msg.Target)
@@ -150,7 +150,7 @@ func (s *Service) Handle(ctx context.Context, msg agentcore.ConfigureNotificatio
 
 	s.logInfo("configure rendering", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "stage", "rendering")
 	if err := s.publishStatus(ctx, msg, "running", "rendering", "rendering desired config"); err != nil {
-		return s.fail(ctx, msg, "status_publish_failed", "configure processing failed", fmt.Errorf("publish configure status rendering: %w", err))
+		s.logWarn("failed to publish configure status", "stage", "rendering", "error", err)
 	}
 
 	rendered, err := s.renderer.Render(ctx, *desired)
@@ -171,12 +171,12 @@ func (s *Service) Handle(ctx context.Context, msg agentcore.ConfigureNotificatio
 		s.logDebug("configure rendered commands", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "rendered_commands", rendered.Text)
 	}
 	if err := s.publishStatus(ctx, msg, "running", "rendered", "desired config rendered"); err != nil {
-		return s.fail(ctx, msg, "status_publish_failed", "configure processing failed", fmt.Errorf("publish configure status rendered: %w", err))
+		s.logWarn("failed to publish configure status", "stage", "rendered", "error", err)
 	}
 
 	s.logInfo("configure applying", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "stage", "applying")
 	if err := s.publishStatus(ctx, msg, "running", "applying", "applying rendered config"); err != nil {
-		return s.fail(ctx, msg, "status_publish_failed", "configure processing failed", fmt.Errorf("publish configure status applying: %w", err))
+		s.logWarn("failed to publish configure status", "stage", "applying", "error", err)
 	}
 
 	if err := s.applyEngine.Apply(ctx, rendered); err != nil {
@@ -191,7 +191,7 @@ func (s *Service) Handle(ctx context.Context, msg agentcore.ConfigureNotificatio
 		AppliedAt:   s.now().UTC(),
 	}
 	if err := s.stateStore.Save(ctx, nextState); err != nil {
-		return s.fail(ctx, msg, "state_save_failed", "failed to save local state", fmt.Errorf("save local state: %w", err))
+		return s.reportingFailure(msg, fmt.Errorf("save local state: %w", err))
 	}
 	s.logInfo("configure state saved", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID)
 

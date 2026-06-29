@@ -627,17 +627,18 @@ func TestHandleApplyFailure(t *testing.T) {
 
 /*
 TC-CONFIGURE-SERVICE-012
-Type: Negative
-Title: Handle fails when state save fails after apply success
+Type: Negative / Recovery
+Title: Handle returns reporting error when state save fails after apply success
 Summary:
 Covers edge case where apply succeeds but local state checkpoint fails.
-Service should publish failed status/result with state_save_failed code
-and return error to caller.
+Service should return a reporting failure error and skip publishing
+both success and failure results.
 
 Validates:
   - apply runs before failure
-  - failure result uses state_save_failed
   - save is attempted exactly once
+  - returns non-nil reporting error
+  - does not publish configure results
 */
 func TestHandleStateSaveFailureAfterApplySuccess(t *testing.T) {
 	msg := agentcore.ConfigureNotification{Version: "1.0", RPCID: "rpc-10", Target: "vyos", UUID: "cfg-10"}
@@ -652,8 +653,11 @@ func TestHandleStateSaveFailureAfterApplySuccess(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	if len(client.results) != 1 || client.results[0].ErrorCode != "state_save_failed" {
-		t.Fatalf("unexpected failure result %+v", client.results)
+	if !strings.Contains(err.Error(), "apply succeeded but reporting failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(client.results) != 0 {
+		t.Fatalf("unexpected published results: %+v", client.results)
 	}
 	if apply.calls != 1 || store.saveCalls != 1 {
 		t.Fatalf("calls apply=%d save=%d want 1/1", apply.calls, store.saveCalls)
@@ -662,17 +666,17 @@ func TestHandleStateSaveFailureAfterApplySuccess(t *testing.T) {
 
 /*
 TC-CONFIGURE-SERVICE-013
-Type: Negative
-Title: Handle publishes failure when status publish fails
+Type: Positive / Recovery
+Title: Handle ignores intermediate status publish failure
 Summary:
 Injects publish error for initial received status stage.
-Service should switch to failure path and publish failure result with
-status_publish_failed error code.
+Intermediate status publication errors should be warnings and the configuration
+flow should continue executing successfully.
 
 Validates:
-  - returned error is non-nil
-  - failure result uses status_publish_failed
-  - no render apply save calls are made
+  - returned error is nil
+  - final result is success
+  - render, apply, and save are executed
 */
 func TestHandleStatusPublishFailureBehavior(t *testing.T) {
 	msg := agentcore.ConfigureNotification{Version: "1.0", RPCID: "rpc-11", Target: "vyos", UUID: "cfg-11"}
@@ -682,19 +686,19 @@ func TestHandleStatusPublishFailureBehavior(t *testing.T) {
 		statusErrByStage: map[string]error{"received": errors.New("publish received failed")},
 	}
 	store := &fakeStateStore{}
-	rndr := &fakeRenderer{}
+	rndr := &fakeRenderer{output: renderer.Output{Target: "vyos", UUID: "cfg-11", Text: "# placeholder"}}
 	apply := &fakeApplyEngine{}
 	svc := newConfigureServiceForTest(t, client, store, rndr, apply, time.Now)
 
 	err := svc.Handle(context.Background(), msg)
-	if err == nil {
-		t.Fatal("expected error, got nil")
+	if err != nil {
+		t.Fatalf("handle failed: %v", err)
 	}
-	if len(client.results) != 1 || client.results[0].ErrorCode != "status_publish_failed" {
-		t.Fatalf("unexpected failure result %+v", client.results)
+	if len(client.results) != 1 || client.results[0].Result != "success" {
+		t.Fatalf("unexpected results %+v", client.results)
 	}
-	if rndr.calls != 0 || apply.calls != 0 || store.saveCalls != 0 {
-		t.Fatalf("calls renderer=%d apply=%d save=%d want 0/0/0", rndr.calls, apply.calls, store.saveCalls)
+	if rndr.calls != 1 || apply.calls != 1 || store.saveCalls != 1 {
+		t.Fatalf("calls renderer=%d apply=%d save=%d want 1/1/1", rndr.calls, apply.calls, store.saveCalls)
 	}
 }
 
@@ -1033,4 +1037,3 @@ func TestHandleAlreadyInSyncPublishFailure(t *testing.T) {
 		}
 	}
 }
-

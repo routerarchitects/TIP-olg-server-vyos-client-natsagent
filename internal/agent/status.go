@@ -23,7 +23,9 @@ func (r *Runtime) publishStartupStatus(ctx context.Context) error {
 		Message:   "vyos-nats-agent started",
 		Timestamp: r.now().UTC(),
 	}
-	if err := r.client.PublishStatus(ctx, msg); err != nil {
+	publishCtx, cancel := context.WithTimeout(context.Background(), startupCloseTimeout)
+	defer cancel()
+	if err := r.client.PublishStatus(publishCtx, msg); err != nil {
 		return fmt.Errorf("publish startup status: %w", err)
 	}
 

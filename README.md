@@ -137,7 +137,7 @@ The state file must only be updated after a successful apply.
 
 ### Apply success with state-save failure
 
-The agent updates local `applied_uuid` only after apply succeeds. If apply succeeds but saving local state fails, the agent reports configure failure and does not checkpoint the UUID. A later retry may re-process the same desired config.
+The agent updates local `applied_uuid` only after apply succeeds. If apply succeeds but saving local state fails, the agent surfaces the error as a reporting failure warning (skipping both success and failure result publications) and does not checkpoint the UUID. A later retry may re-process the same desired config.
 
 Real-mode lab validation should include retry behavior around post-apply state-save failures before production rollout.
 

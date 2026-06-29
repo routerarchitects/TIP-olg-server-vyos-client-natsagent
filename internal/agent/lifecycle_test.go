@@ -69,10 +69,65 @@ Close is triggered to clean up resources before returning the error.
 
 Validates:
   - client Start succeeds
-  - context cancellation during timestamp retrieval causes status publish failure
+  - NATS connection failure during timestamp retrieval causes status publish failure
   - Runtime Close is called and closed state is set to true
 */
 func TestRuntimeStartFailureCloses(t *testing.T) {
+	url, stopNats := startNatsServer(t)
+	// We do not defer stopNats here because we will call it manually to simulate a connection error.
+
+	cfg := config.DefaultAppConfig()
+	cfg.Agent.Configure.Mode = "placeholder"
+	cfg.Agent.StateFile = t.TempDir() + "/state.json"
+	cfg.AgentCore.NATS.Servers = []string{url}
+	cfg.AgentCore.NATS.ConnectTimeout = "500ms"
+
+	coreCfg, err := cfg.ToAgentCoreConfig()
+	if err != nil {
+		t.Fatalf("failed to build core config: %v", err)
+	}
+
+	ctx := context.Background()
+
+	customClock := func() time.Time {
+		stopNats()
+		return time.Now()
+	}
+
+	rt, err := New(&cfg, coreCfg, WithClock(customClock))
+	if err != nil {
+		t.Fatalf("failed to create runtime: %v", err)
+	}
+
+	err = rt.Start(ctx)
+	if err == nil {
+		t.Fatal("expected Start() to fail due to NATS connection error, got nil")
+	}
+
+	rt.mu.Lock()
+	closed := rt.closed
+	rt.mu.Unlock()
+
+	if !closed {
+		t.Error("expected runtime to be closed after startup failure")
+	}
+}
+
+/*
+TC-AGENT-LIFECYCLE-002
+Type: Positive / Recovery
+Title: Runtime handles SIGTERM during startup and shuts down gracefully
+Summary:
+Verifies that if a signal-derived context is cancelled during startup (after client Start
+but before status publish), the status is still published using a fresh context, and the
+runtime shuts down gracefully returning nil.
+
+Validates:
+  - client Start succeeds
+  - context cancellation during startup does not fail status publish
+  - rt.Run(ctx) returns nil (exit code 0) on graceful shutdown
+*/
+func TestRuntimeSIGTERMDuringStartupGracefulShutdown(t *testing.T) {
 	url, stopNats := startNatsServer(t)
 	defer stopNats()
 
@@ -90,7 +145,7 @@ func TestRuntimeStartFailureCloses(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	customClock := func() time.Time {
-		cancel()
+		cancel() // Cancel the signal-derived context during startup status timestamp generation
 		return time.Now()
 	}
 
@@ -99,9 +154,9 @@ func TestRuntimeStartFailureCloses(t *testing.T) {
 		t.Fatalf("failed to create runtime: %v", err)
 	}
 
-	err = rt.Start(ctx)
-	if err == nil {
-		t.Fatal("expected Start() to fail due to context cancellation, got nil")
+	err = rt.Run(ctx)
+	if err != nil {
+		t.Fatalf("expected Run() to return nil for graceful shutdown, got: %v", err)
 	}
 
 	rt.mu.Lock()
@@ -109,6 +164,6 @@ func TestRuntimeStartFailureCloses(t *testing.T) {
 	rt.mu.Unlock()
 
 	if !closed {
-		t.Error("expected runtime to be closed after startup failure")
+		t.Error("expected runtime to be closed after Run() completed")
 	}
 }

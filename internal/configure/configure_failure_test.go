@@ -251,6 +251,22 @@ Validates:
   - failure result uses state_save_failed
   - no success result/status is published
 */
+/*
+TC-CONFIGURE-FAILURE-007
+Type: Recovery
+Title: State save failure returns reporting error and skips results
+Summary:
+Runs configure with successful render/apply and failing state save.
+The handler should return a reporting failure error and skip publishing
+both success and failure results.
+
+Validates:
+  - renderer is called exactly once
+  - apply is called exactly once
+  - state save is attempted once
+  - returns non-nil reporting error
+  - does not publish configure results
+*/
 func TestConfigureStateSaveFailureMarksConfigureFailed(t *testing.T) {
 	fixture := newFailureWorkflowFixture(t, "cfg-save-fail")
 	fixture.store.SaveErr = errors.New("disk full")
@@ -258,6 +274,9 @@ func TestConfigureStateSaveFailureMarksConfigureFailed(t *testing.T) {
 	err := fixture.service.Handle(context.Background(), fixture.msg)
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "apply succeeded but reporting failed") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if got := fixture.renderer.Calls(); got != 1 {
@@ -269,8 +288,9 @@ func TestConfigureStateSaveFailureMarksConfigureFailed(t *testing.T) {
 	if got := fixture.store.SaveCalls(); got != 1 {
 		t.Fatalf("save calls got=%d want=1", got)
 	}
-	assertConfigureFailureResult(t, fixture.client, fixture.msg.Target, fixture.msg.UUID, fixture.msg.RPCID, "state_save_failed")
-	assertConfigureFailurePublishedWithoutSuccess(t, fixture.client)
+	if len(fixture.client.Results()) != 0 {
+		t.Fatalf("unexpected published results: %+v", fixture.client.Results())
+	}
 }
 
 /*
@@ -288,6 +308,22 @@ Validates:
   - requested UUID is not treated as applied
   - failure result uses state_save_failed
 */
+/*
+TC-CONFIGURE-FAILURE-008
+Type: Safety
+Title: State save failure does not persist UUID
+Summary:
+Seeds local state with a previous UUID and makes checkpoint save fail
+after successful render/apply. Attempted saves are observable, but the
+fake store must not treat failed saves as persisted current state.
+
+Validates:
+  - state save is attempted once
+  - current state remains previous UUID
+  - requested UUID is not treated as applied
+  - returns non-nil reporting error
+  - does not publish configure results
+*/
 func TestConfigureStateSaveFailureDoesNotPersistUUID(t *testing.T) {
 	fixture := newFailureWorkflowFixture(t, "cfg-save-new")
 	fixture.store.Current = state.State{Target: fixture.msg.Target, AppliedUUID: "cfg-previous"}
@@ -296,6 +332,9 @@ func TestConfigureStateSaveFailureDoesNotPersistUUID(t *testing.T) {
 	err := fixture.service.Handle(context.Background(), fixture.msg)
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+	if !strings.Contains(err.Error(), "apply succeeded but reporting failed") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 
 	if got := fixture.store.SaveCalls(); got != 1 {
@@ -307,7 +346,9 @@ func TestConfigureStateSaveFailureDoesNotPersistUUID(t *testing.T) {
 	if current := fixture.store.CurrentState(); current.AppliedUUID == fixture.msg.UUID {
 		t.Fatalf("failed save persisted requested uuid %q", fixture.msg.UUID)
 	}
-	assertConfigureFailureResult(t, fixture.client, fixture.msg.Target, fixture.msg.UUID, fixture.msg.RPCID, "state_save_failed")
+	if len(fixture.client.Results()) != 0 {
+		t.Fatalf("unexpected published results: %+v", fixture.client.Results())
+	}
 }
 
 /*
@@ -398,12 +439,6 @@ func TestConfigureFailureDoesNotPublishSuccess(t *testing.T) {
 				f.apply.Err = errors.New("apply failed")
 			},
 		},
-		{
-			name: "state save failure",
-			mutate: func(f *phase3WorkflowFixture) {
-				f.store.SaveErr = errors.New("save failed")
-			},
-		},
 	}
 
 	for _, tc := range cases {
@@ -452,13 +487,6 @@ func TestConfigureFailureIncludesCorrelationData(t *testing.T) {
 			code: "apply_failed",
 			mutate: func(f *phase3WorkflowFixture) {
 				f.apply.Err = errors.New("apply failed")
-			},
-		},
-		{
-			name: "state save failure",
-			code: "state_save_failed",
-			mutate: func(f *phase3WorkflowFixture) {
-				f.store.SaveErr = errors.New("save failed")
 			},
 		},
 	}
