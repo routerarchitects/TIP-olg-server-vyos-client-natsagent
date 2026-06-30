@@ -1,0 +1,341 @@
+package configure
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/state"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/wire"
+)
+
+type Service struct {
+	client      AgentCoreClient
+	stateStore  StateStore
+	renderer    Renderer
+	applyEngine ApplyEngine
+	logger      agentcore.Logger
+	now         func() time.Time
+	mu          sync.Mutex
+	debug       DebugLogging
+}
+
+type Dependencies struct {
+	Client      AgentCoreClient
+	StateStore  StateStore
+	Renderer    Renderer
+	ApplyEngine ApplyEngine
+	Logger      agentcore.Logger
+	Debug       DebugLogging
+	Now         func() time.Time
+}
+
+type DebugLogging struct {
+	LogPayloads  bool
+	LogRendered  bool
+	LogApplyPlan bool
+}
+
+func NewService(deps Dependencies) (*Service, error) {
+	if deps.Client == nil {
+		return nil, errors.New("configure service: client is required")
+	}
+	if deps.StateStore == nil {
+		return nil, errors.New("configure service: state store is required")
+	}
+	if deps.Renderer == nil {
+		return nil, errors.New("configure service: renderer is required")
+	}
+	if deps.ApplyEngine == nil {
+		return nil, errors.New("configure service: apply engine is required")
+	}
+	if deps.Now == nil {
+		deps.Now = time.Now
+	}
+
+	return &Service{
+		client:      deps.Client,
+		stateStore:  deps.StateStore,
+		renderer:    deps.Renderer,
+		applyEngine: deps.ApplyEngine,
+		logger:      deps.Logger,
+		now:         deps.Now,
+		debug:       deps.Debug,
+	}, nil
+}
+
+func (s *Service) Handle(ctx context.Context, msg agentcore.ConfigureNotification) error {
+	if ctx == nil {
+		return errors.New("configure handle: context is nil")
+	}
+
+	started := s.now()
+	defer func() {
+		s.logInfo(
+			"configure processing completed",
+			"target", msg.Target,
+			"rpc_id", msg.RPCID,
+			"uuid", msg.UUID,
+			"duration_ms", s.now().Sub(started).Milliseconds(),
+		)
+	}()
+
+	// Serialize configure processing so local applied UUID load/apply/save remains ordered.
+	// Future multi-target support can replace this with per-target locking.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if strings.TrimSpace(msg.Target) == "" {
+		return s.fail(ctx, msg, "notification_target_invalid", "configure notification target invalid", errors.New("configure notification target is empty"))
+	}
+	if strings.TrimSpace(msg.UUID) == "" {
+		return s.fail(ctx, msg, "notification_uuid_invalid", "configure notification uuid invalid", errors.New("configure notification uuid is empty"))
+	}
+
+	if err := s.publishStatus(ctx, msg, "running", "received", "configure notification received"); err != nil {
+		s.logWarn("failed to publish configure status", "stage", "received", "error", err)
+	}
+
+	s.logInfo("configure desired loading", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "stage", "loading_desired")
+	if err := s.publishStatus(ctx, msg, "running", "loading_desired", "loading desired config"); err != nil {
+		s.logWarn("failed to publish configure status", "stage", "loading_desired", "error", err)
+	}
+
+	desired, err := s.client.LoadDesiredConfig(ctx, msg.Target)
+	if err != nil {
+		return s.fail(ctx, msg, "load_desired_failed", "failed to load desired config", fmt.Errorf("load desired config: %w", err))
+	}
+	if desired == nil {
+		return s.fail(ctx, msg, "desired_config_missing", "desired config missing", errors.New("desired config is nil"))
+	}
+	if strings.TrimSpace(desired.Record.Target) == "" {
+		return s.fail(ctx, msg, "desired_target_invalid", "desired target invalid", errors.New("desired target is empty"))
+	}
+	if strings.TrimSpace(desired.Record.UUID) == "" {
+		return s.fail(ctx, msg, "desired_uuid_invalid", "desired uuid invalid", errors.New("desired uuid is empty"))
+	}
+	if desired.Record.Target != msg.Target {
+		return s.fail(ctx, msg, "desired_target_mismatch", "desired target mismatch", fmt.Errorf("desired target %q does not match notification target %q", desired.Record.Target, msg.Target))
+	}
+	if desired.Record.UUID != msg.UUID {
+		return s.fail(ctx, msg, "desired_uuid_mismatch", "desired uuid mismatch", fmt.Errorf("desired uuid %q does not match notification uuid %q", desired.Record.UUID, msg.UUID))
+	}
+	s.logInfo("configure desired loaded", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "payload_size_bytes", len(desired.Record.Payload))
+	if s.debug.LogPayloads {
+		s.logDebug("configure desired payload summary", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "payload_size_bytes", len(desired.Record.Payload), "payload_body_omitted", true)
+	}
+
+	localState, err := s.stateStore.Load(ctx)
+	if err != nil {
+		return s.fail(ctx, msg, "state_load_failed", "failed to load local state", fmt.Errorf("load local state: %w", err))
+	}
+	s.logInfo("configure state loaded", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID)
+
+	if localState.Target == msg.Target && localState.AppliedUUID == desired.Record.UUID {
+		s.logInfo("configure already in sync", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "stage", "already_in_sync", "status", "success")
+		statusErr := s.publishStatus(ctx, msg, "success", "already_in_sync", "desired config already applied")
+		resultErr := s.publishSuccessResult(ctx, msg, "desired config already applied")
+		if statusErr != nil || resultErr != nil {
+			return s.reportingFailure(msg, errors.Join(statusErr, resultErr))
+		}
+		return nil
+	}
+
+	s.logInfo("configure rendering", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "stage", "rendering")
+	if err := s.publishStatus(ctx, msg, "running", "rendering", "rendering desired config"); err != nil {
+		s.logWarn("failed to publish configure status", "stage", "rendering", "error", err)
+	}
+
+	rendered, err := s.renderer.Render(ctx, *desired)
+	if err != nil {
+		return s.fail(ctx, msg, "render_failed", "failed to render desired config", fmt.Errorf("render desired config: %w", err))
+	}
+
+	s.logInfo(
+		"configure rendered",
+		"target", msg.Target,
+		"rpc_id", msg.RPCID,
+		"uuid", msg.UUID,
+		"stage", "rendered",
+		"rendered_size_bytes", len(rendered.Text),
+		"rendered_command_count", countNonEmptyLines(rendered.Text),
+	)
+	if s.debug.LogRendered {
+		s.logDebug("configure rendered commands", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "rendered_commands", rendered.Text)
+	}
+	if err := s.publishStatus(ctx, msg, "running", "rendered", "desired config rendered"); err != nil {
+		s.logWarn("failed to publish configure status", "stage", "rendered", "error", err)
+	}
+
+	s.logInfo("configure applying", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "stage", "applying")
+	if err := s.publishStatus(ctx, msg, "running", "applying", "applying rendered config"); err != nil {
+		s.logWarn("failed to publish configure status", "stage", "applying", "error", err)
+	}
+
+	if err := s.applyEngine.Apply(ctx, rendered); err != nil {
+		return s.fail(ctx, msg, "apply_failed", "failed to apply rendered config", fmt.Errorf("apply rendered config: %w", err))
+	}
+
+	s.logInfo("configure applied", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "stage", "applied")
+
+	nextState := state.State{
+		Target:      msg.Target,
+		AppliedUUID: desired.Record.UUID,
+		AppliedAt:   s.now().UTC(),
+	}
+	if err := s.stateStore.Save(ctx, nextState); err != nil {
+		return s.reportingFailure(msg, fmt.Errorf("save local state: %w", err))
+	}
+	s.logInfo("configure state saved", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID)
+
+	s.logInfo("configure result publishing", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "status", "success")
+	statusErr := publishSuccessStatusErr(s.publishStatus(ctx, msg, "success", "applied", "configure apply completed"))
+	resultErr := publishSuccessResultErr(s.publishSuccessResult(ctx, msg, "configure apply completed"))
+	if resultErr == nil {
+		s.logInfo("configure result published", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "status", "success")
+	}
+	if statusErr != nil || resultErr != nil {
+		return s.reportingFailure(msg, errors.Join(statusErr, resultErr))
+	}
+
+	return nil
+}
+
+func (s *Service) fail(ctx context.Context, msg agentcore.ConfigureNotification, code, safeMessage string, originalErr error) error {
+	s.logError("configure failed", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "stage", "failed", "status", "failure", "error_code", code, "message", safeMessage)
+
+	var statusErr error
+	if err := s.publishStatus(ctx, msg, "failure", "failed", "configure processing failed"); err != nil {
+		statusErr = fmt.Errorf("publish configure failure status: %w", err)
+	}
+
+	var resultErr error
+	if err := s.publishFailureResult(ctx, msg, code, safeMessage); err != nil {
+		resultErr = fmt.Errorf("publish configure failure result: %w", err)
+	}
+
+	return errors.Join(originalErr, statusErr, resultErr)
+}
+
+func (s *Service) reportingFailure(msg agentcore.ConfigureNotification, originalErr error) error {
+	s.logWarn(
+		"configure reporting failed after successful apply",
+		"target", msg.Target,
+		"rpc_id", msg.RPCID,
+		"uuid", msg.UUID,
+		"stage", "reporting_failed",
+		"status", "warning",
+		"error", originalErr,
+	)
+	return fmt.Errorf("configure apply succeeded but reporting failed: %w", originalErr)
+}
+
+func publishSuccessStatusErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("publish configure status applied: %w", err)
+}
+
+func publishSuccessResultErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("publish configure success result: %w", err)
+}
+
+func (s *Service) publishStatus(ctx context.Context, msg agentcore.ConfigureNotification, status, stage, message string) error {
+	return s.client.PublishStatus(ctx, wire.BuildStatus(
+		msg.RPCID,
+		msg.Target,
+		msg.UUID,
+		status,
+		stage,
+		message,
+		s.now().UTC(),
+	))
+}
+
+func (s *Service) publishSuccessResult(ctx context.Context, msg agentcore.ConfigureNotification, message string) error {
+	return s.client.PublishResult(ctx, wire.BuildResult(
+		msg.RPCID,
+		msg.Target,
+		"configure",
+		msg.UUID,
+		"",
+		"success",
+		"",
+		message,
+		nil,
+		s.now().UTC(),
+	))
+}
+
+func (s *Service) publishFailureResult(ctx context.Context, msg agentcore.ConfigureNotification, code, message string) error {
+	return s.client.PublishResult(ctx, wire.BuildResult(
+		msg.RPCID,
+		msg.Target,
+		"configure",
+		msg.UUID,
+		"",
+		"failure",
+		code,
+		message,
+		nil,
+		s.now().UTC(),
+	))
+}
+
+func (s *Service) logInfo(msg string, kv ...any) {
+	if s.logger == nil {
+		return
+	}
+	s.logger.Info(msg, kv...)
+}
+
+func (s *Service) logDebug(msg string, kv ...any) {
+	if s.logger == nil {
+		return
+	}
+	s.logger.Debug(msg, kv...)
+}
+
+func (s *Service) logError(msg string, kv ...any) {
+	if s.logger == nil {
+		return
+	}
+	s.logger.Error(msg, kv...)
+}
+
+func (s *Service) logWarn(msg string, kv ...any) {
+	if s.logger == nil {
+		return
+	}
+	s.logger.Warn(msg, kv...)
+}
+
+func countNonEmptyLines(text string) int {
+	count := 0
+	inLine := false
+	for _, r := range text {
+		switch r {
+		case '\n', '\r':
+			if inLine {
+				count++
+				inLine = false
+			}
+		case ' ', '\t':
+			continue
+		default:
+			inLine = true
+		}
+	}
+	if inLine {
+		count++
+	}
+	return count
+}

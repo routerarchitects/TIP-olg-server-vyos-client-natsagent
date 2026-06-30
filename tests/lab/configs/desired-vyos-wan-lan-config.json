@@ -1,0 +1,68 @@
+{
+  "schema_name": "olg-ucentral",
+  "schema_version": "4.2.0",
+  "config": {
+    "uuid": 1779874987,
+    "interfaces": [
+      {
+        "name": "OLG_APPLY_SMOKE_TEST_Upstream",
+        "role": "upstream",
+        "ethernet": [
+          {
+            "select-ports": [
+              "WAN*"
+            ]
+          }
+        ],
+        "ipv4": {
+          "addressing": "dynamic"
+        }
+      },
+      {
+        "ethernet": [
+            {
+                "select-ports": [
+                    "LAN1"
+                ]
+            }
+        ],
+        "ipv4": {
+            "addressing": "static",
+            "dhcp": {
+                "lease-count": 128,
+                "lease-first": 10,
+                "lease-time": "6h"
+            },
+            "gateway": "192.168.60.1",
+            "send-hostname": true,
+            "subnet": "192.168.60.1/24"
+        },
+        "name": "LAN",
+        "role": "downstream"
+        }
+    ],
+    "nat": {
+        "snat": {
+            "rules": [
+                {
+                    "out-interface": {
+                        "name": "br0"
+                    },
+                    "rule-id": 100,
+                    "source": {
+                        "address": "192.168.60.0/24"
+                    },
+                    "translation": {
+                        "address": "masquerade"
+                    }
+                }
+            ]
+        }
+    },
+    "services": {
+        "ssh": {
+            "port": 22
+        }
+    }
+  }
+}
