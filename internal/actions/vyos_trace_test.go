@@ -608,3 +608,53 @@ func TestVyOSTraceExecutorUploadTimeout(t *testing.T) {
 		}
 	}
 }
+
+/*
+TC-ACTIONS-TRACE-010
+Type: Negative
+Title: Handles tcpdump execution failures
+Summary:
+Simulates a runtime error during tcpdump execution (e.g. exit status 1).
+Asserts that the executor returns a packet capture failed error, does not upload,
+and ensures that the temporary PCAP file is still cleaned up correctly.
+Validates:
+  - tcpdump command execution failures are caught and returned
+  - local PCAP file cleanup occurs on execution failure
+*/
+func TestVyOSTraceExecutorExecutionFailure(t *testing.T) {
+	runner := &fakeCommandRunner{
+		runErr: errors.New("exit status 1"),
+	}
+	exec := NewVyOSTraceExecutor(runner, nil)
+
+	msg := agentcore.ActionCommand{
+		Version: "1.0",
+		RPCID:   "rpc-trace-exec-fail",
+		Target:  "vyos",
+		Action:  ActionTrace,
+		Payload: json.RawMessage(`{
+			"interface": "eth0",
+			"duration": 5,
+			"uri": "http://localhost"
+		}`),
+		Timestamp: time.Now(),
+	}
+
+	_, err := exec.Execute(context.Background(), msg)
+	if err == nil {
+		t.Fatal("expected execution failure error, got nil")
+	}
+	if !strings.Contains(err.Error(), "packet capture failed") {
+		t.Fatalf("unexpected error message: %v", err)
+	}
+	if strings.Contains(err.Error(), "capture aborted") {
+		t.Fatalf("error message contains unexpected 'capture aborted': %v", err)
+	}
+
+	// Verify local cleanup happens even on execution failures
+	if runner.lastPcapPath != "" {
+		if _, err := os.Stat(runner.lastPcapPath); !os.IsNotExist(err) {
+			t.Fatalf("expected pcap file to be cleaned up on execution failure, stat returned: %v", err)
+		}
+	}
+}
