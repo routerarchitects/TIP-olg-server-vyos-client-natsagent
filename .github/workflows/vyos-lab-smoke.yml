@@ -26,7 +26,6 @@ jobs:
     timeout-minutes: 20
     env:
       LAB_ARTIFACT_DIR: ${{ github.workspace }}/tests/lab/artifacts/github-actions/run-${{ github.run_id }}-attempt-${{ github.run_attempt }}
-      SSH_KEY_PATH: ${{ runner.temp }}/vyos_lab_key
 
     steps:
       - name: Checkout
@@ -41,6 +40,7 @@ jobs:
       - name: Prepare SSH key
         env:
           VYOS_SSH_KEY_SECRET: ${{ secrets.VYOS_SSH_KEY }}
+          SSH_KEY_PATH: ${{ runner.temp }}/vyos_lab_key
         run: |
           if [ -n "$VYOS_SSH_KEY_SECRET" ]; then
             rm -f "$SSH_KEY_PATH"
@@ -64,6 +64,7 @@ jobs:
           STATE_PATH: ${{ inputs.state_path }}
           DESIRED_CONFIG_FILE: ${{ inputs.desired_config }}
           ARTIFACT_DIR: ${{ env.LAB_ARTIFACT_DIR }}
+          SSH_KEY_PATH: ${{ runner.temp }}/vyos_lab_key
         run: |
           if [ -f "$SSH_KEY_PATH" ]; then
             export VYOS_SSH_KEY="$SSH_KEY_PATH"
@@ -79,6 +80,8 @@ jobs:
 
       - name: Cleanup SSH key
         if: always()
+        env:
+          SSH_KEY_PATH: ${{ runner.temp }}/vyos_lab_key
         run: |
           if [ -f "$SSH_KEY_PATH" ]; then
             shred -u "$SSH_KEY_PATH" 2>/dev/null || rm -f "$SSH_KEY_PATH"
