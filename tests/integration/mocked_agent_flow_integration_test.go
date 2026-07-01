@@ -1483,10 +1483,10 @@ func startTestNATSServerWithStop(t *testing.T) (string, func()) {
 	clientPortPattern := regexp.MustCompile(`Listening for client connections on .*:(\d+)`)
 	attemptLogs := make([]string, 0, 2)
 	for _, portArg := range []string{"0", "-1"} {
-		var logs bytes.Buffer
+		logs := &safeBuffer{}
 		cmd := exec.Command(bin, "-js", "-a", "127.0.0.1", "-p", portArg, "-sd", dataDir)
-		cmd.Stdout = &logs
-		cmd.Stderr = &logs
+		cmd.Stdout = logs
+		cmd.Stderr = logs
 		if err := cmd.Start(); err != nil {
 			t.Fatalf("start nats-server: %v", err)
 		}
