@@ -174,6 +174,7 @@ Validates:
 func TestVyOSTraceExecutorPayloadValidation(t *testing.T) {
 	runner := &fakeCommandRunner{}
 	exec := NewVyOSTraceExecutor(runner, nil)
+	exec.routeResolver = func(_ string) string { return "" }
 
 	cases := []struct {
 		name    string

@@ -61,6 +61,7 @@ type VyOSTraceExecutor struct {
 	runner        CommandRunner
 	client        *http.Client
 	uploadTimeout time.Duration
+	routeResolver func(network string) string
 }
 
 func NewVyOSTraceExecutor(runner CommandRunner, client *http.Client) *VyOSTraceExecutor {
@@ -71,14 +72,88 @@ func NewVyOSTraceExecutor(runner CommandRunner, client *http.Client) *VyOSTraceE
 		runner:        runner,
 		client:        client,
 		uploadTimeout: 30 * time.Second,
+		routeResolver: resolveNetworkInterface,
 	}
 }
 
 type tracePayload struct {
 	Interface string `json:"interface"`
+	Network   string `json:"network"`
 	Duration  int    `json:"duration"`
 	Packets   int    `json:"packets"`
 	URI       string `json:"uri"`
+}
+
+// resolveDefaultWANInterface detects the default gateway WAN interface by reading /proc/net/route.
+func resolveDefaultWANInterface() string {
+	f, err := os.Open("/proc/net/route")
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	content, err := io.ReadAll(f)
+	if err != nil {
+		return ""
+	}
+
+	lines := strings.Split(string(content), "\n")
+	for i, line := range lines {
+		if i == 0 || strings.TrimSpace(line) == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		// /proc/net/route columns: Iface, Destination, Gateway, Flags, ...
+		// Destination "00000000" represents the default route (0.0.0.0)
+		if len(fields) >= 2 && fields[1] == "00000000" {
+			return fields[0]
+		}
+	}
+	return ""
+}
+
+// resolveDefaultLANInterface detects a LAN interface by checking standard Linux aliases or common bridge/LAN names.
+func resolveDefaultLANInterface(wanIface string) string {
+	// First check /sys/class/net/* for an interface with alias "LAN"
+	entries, err := os.ReadDir("/sys/class/net")
+	if err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if name == "lo" || name == wanIface || strings.HasPrefix(name, "eth3") {
+				continue
+			}
+			aliasBytes, err := os.ReadFile(filepath.Join("/sys/class/net", name, "ifalias"))
+			if err == nil && strings.EqualFold(strings.TrimSpace(string(aliasBytes)), "lan") {
+				return name
+			}
+		}
+	}
+
+	// Fallback to well-known LAN bridge/interface conventions if found
+	candidates := []string{"br1", "br-lan", "lan0", "eth1"}
+	for _, cand := range candidates {
+		if cand == wanIface {
+			continue
+		}
+		if _, err := os.Stat(filepath.Join("/sys/class/net", cand)); err == nil {
+			return cand
+		}
+	}
+
+	return ""
+}
+
+// resolveNetworkInterface resolves the interface name based on network direction ("up" for WAN, "down" for LAN).
+func resolveNetworkInterface(network string) string {
+	wan := resolveDefaultWANInterface()
+	netLower := strings.ToLower(strings.TrimSpace(network))
+	if netLower == "down" || netLower == "lan" {
+		lan := resolveDefaultLANInterface(wan)
+		if lan != "" {
+			return lan
+		}
+	}
+	return wan
 }
 
 func (e *VyOSTraceExecutor) Execute(ctx context.Context, msg agentcore.ActionCommand) (Output, error) {
@@ -114,10 +189,15 @@ func (e *VyOSTraceExecutor) Execute(ctx context.Context, msg agentcore.ActionCom
 		return Output{}, fmt.Errorf("%w: packets %d must be between 0 and %d", ErrInvalidActionPayload, payload.Packets, maxPackets)
 	}
 
-	// Validate interface
-	interfaceName := payload.Interface
+	// Resolve interface if omitted
+	interfaceName := strings.TrimSpace(payload.Interface)
 	if len(interfaceName) == 0 {
-		return Output{}, fmt.Errorf("%w: interface is required", ErrInvalidActionPayload)
+		if e.routeResolver != nil {
+			interfaceName = e.routeResolver(payload.Network)
+		}
+	}
+	if len(interfaceName) == 0 {
+		return Output{}, fmt.Errorf("%w: interface is required and could not be determined", ErrInvalidActionPayload)
 	}
 	if strings.Contains(interfaceName, "..") || strings.Contains(interfaceName, "/") || strings.Contains(interfaceName, "\\") {
 		return Output{}, fmt.Errorf("%w: invalid interface name %q", ErrInvalidActionPayload, interfaceName)
@@ -134,6 +214,7 @@ func (e *VyOSTraceExecutor) Execute(ctx context.Context, msg agentcore.ActionCom
 	if !interfaceValid {
 		return Output{}, fmt.Errorf("%w: invalid interface name %q", ErrInvalidActionPayload, interfaceName)
 	}
+	payload.Interface = interfaceName
 
 	// Validate URI
 	if len(payload.URI) == 0 {
