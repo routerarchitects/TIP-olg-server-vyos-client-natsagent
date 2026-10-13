@@ -660,32 +660,321 @@ func TestVyOSTraceExecutorExecutionFailure(t *testing.T) {
 	}
 }
 
+type fakeNetworkInspector struct {
+	defaultRouteDevFn func(ctx context.Context) (string, error)
+	procNetRouteFn    func() ([]byte, error)
+	netInterfacesFn   func() ([]InterfaceInfo, error)
+}
+
+func (f *fakeNetworkInspector) DefaultRouteDev(ctx context.Context) (string, error) {
+	if f.defaultRouteDevFn != nil {
+		return f.defaultRouteDevFn(ctx)
+	}
+	return "", errors.New("no default route")
+}
+
+func (f *fakeNetworkInspector) ProcNetRoute() ([]byte, error) {
+	if f.procNetRouteFn != nil {
+		return f.procNetRouteFn()
+	}
+	return nil, os.ErrNotExist
+}
+
+func (f *fakeNetworkInspector) NetInterfaces() ([]InterfaceInfo, error) {
+	if f.netInterfacesFn != nil {
+		return f.netInterfacesFn()
+	}
+	return nil, nil
+}
+
+func TestParseDefaultRouteFromIPRoute(t *testing.T) {
+	t.Run("selects lowest metric default route and ignores specific host routes", func(t *testing.T) {
+		out := `default via 192.168.1.1 dev eth0 metric 100
+8.8.8.8 via 192.168.2.1 dev eth1 metric 10
+default via 192.168.3.1 dev eth2 metric 50
+10.0.0.0/8 dev eth3 proto kernel scope link
+`
+		// Even though 8.8.8.8 has metric 10 on eth1, it is a specific host route.
+		// The lowest metric default route is eth2 (metric 50 < 100).
+		got := parseDefaultRouteFromIPRoute([]byte(out))
+		if got != "eth2" {
+			t.Fatalf("expected eth2, got %q", got)
+		}
+	})
+
+	t.Run("handles direct default route without metric", func(t *testing.T) {
+		out := `default dev ppp0 scope link`
+		got := parseDefaultRouteFromIPRoute([]byte(out))
+		if got != "ppp0" {
+			t.Fatalf("expected ppp0, got %q", got)
+		}
+	})
+
+	t.Run("handles empty output", func(t *testing.T) {
+		if got := parseDefaultRouteFromIPRoute(nil); got != "" {
+			t.Fatalf("expected empty string, got %q", got)
+		}
+	})
+}
+
+func TestParseDefaultRouteFromProcNetRoute(t *testing.T) {
+	t.Run("selects lowest metric up default route and ignores down/non-default routes", func(t *testing.T) {
+		table := `Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
+eth0	00000000	0100A8C0	0003	0	0	20	00000000	0	0	0
+eth1	00000000	0101A8C0	0003	0	0	10	00000000	0	0	0
+eth2	00000000	0102A8C0	0002	0	0	5	00000000	0	0	0
+eth3	0001A8C0	00000000	0001	0	0	0	00FFFFFF	0	0	0
+`
+		// eth2 has lowest metric (5) but lacks RTF_UP (0x0001).
+		// eth1 has metric 10 and is UP.
+		// eth0 has metric 20 and is UP.
+		// eth3 is not default route.
+		got := parseDefaultRouteFromProcNetRoute([]byte(table))
+		if got != "eth1" {
+			t.Fatalf("expected eth1, got %q", got)
+		}
+	})
+
+	t.Run("returns empty when no default route", func(t *testing.T) {
+		table := `Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
+eth3	0001A8C0	00000000	0001	0	0	0	00FFFFFF	0	0	0
+`
+		if got := parseDefaultRouteFromProcNetRoute([]byte(table)); got != "" {
+			t.Fatalf("expected empty string, got %q", got)
+		}
+	})
+
+	t.Run("handles empty input", func(t *testing.T) {
+		if got := parseDefaultRouteFromProcNetRoute(nil); got != "" {
+			t.Fatalf("expected empty string, got %q", got)
+		}
+	})
+}
+
+func TestResolveDefaultWANInterface(t *testing.T) {
+	t.Run("prefers kernel default route over descriptive wan alias", func(t *testing.T) {
+		// Multi-WAN: eth0 has alias "WAN"; default route is on eth1
+		inspector := &fakeNetworkInspector{
+			defaultRouteDevFn: func(ctx context.Context) (string, error) {
+				return "eth1", nil
+			},
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0", Alias: "WAN", OperState: "up"},
+					{Name: "eth1", OperState: "up"},
+				}, nil
+			},
+		}
+
+		wan := resolveDefaultWANInterface(context.Background(), inspector)
+		if wan != "eth1" {
+			t.Fatalf("expected default route interface eth1, got %q", wan)
+		}
+	})
+
+	t.Run("falls back to proc net route with lowest metric when default route dev fails", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			defaultRouteDevFn: func(ctx context.Context) (string, error) {
+				return "", errors.New("command failed")
+			},
+			procNetRouteFn: func() ([]byte, error) {
+				table := `Iface	Destination	Gateway 	Flags	RefCnt	Use	Metric	Mask		MTU	Window	IRTT
+eth0	00000000	0100A8C0	0003	0	0	100	00000000	0	0	0
+eth1	00000000	0101A8C0	0003	0	0	50	00000000	0	0	0
+`
+				return []byte(table), nil
+			},
+		}
+
+		wan := resolveDefaultWANInterface(context.Background(), inspector)
+		if wan != "eth1" {
+			t.Fatalf("expected eth1 from route table, got %q", wan)
+		}
+	})
+
+	t.Run("falls back to unambiguous wan alias when no route exists and interface is up", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			defaultRouteDevFn: func(ctx context.Context) (string, error) {
+				return "", errors.New("command failed")
+			},
+			procNetRouteFn: func() ([]byte, error) {
+				return []byte(""), nil
+			},
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0", Alias: "WAN", OperState: "up"},
+					{Name: "eth1", OperState: "up"},
+				}, nil
+			},
+		}
+
+		wan := resolveDefaultWANInterface(context.Background(), inspector)
+		if wan != "eth0" {
+			t.Fatalf("expected eth0, got %q", wan)
+		}
+	})
+
+	t.Run("returns empty when multiple interfaces have wan alias", func(t *testing.T) {
+		// Ambiguous WAN alias fallback
+		inspector := &fakeNetworkInspector{
+			defaultRouteDevFn: func(ctx context.Context) (string, error) {
+				return "", errors.New("command failed")
+			},
+			procNetRouteFn: func() ([]byte, error) {
+				return []byte(""), nil
+			},
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0", Alias: "WAN", OperState: "up"},
+					{Name: "eth1", Alias: "WAN", OperState: "up"},
+				}, nil
+			},
+		}
+
+		wan := resolveDefaultWANInterface(context.Background(), inspector)
+		if wan != "" {
+			t.Fatalf("expected empty string for ambiguous WAN aliases, got %q", wan)
+		}
+	})
+
+	t.Run("ignores wan alias when operstate is not up", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			defaultRouteDevFn: func(ctx context.Context) (string, error) {
+				return "", errors.New("command failed")
+			},
+			procNetRouteFn: func() ([]byte, error) {
+				return []byte(""), nil
+			},
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0", Alias: "WAN", OperState: "unknown"},
+					{Name: "eth1", Alias: "WAN", OperState: "down"},
+				}, nil
+			},
+		}
+
+		wan := resolveDefaultWANInterface(context.Background(), inspector)
+		if wan != "" {
+			t.Fatalf("expected empty string for non-up WAN interface, got %q", wan)
+		}
+	})
+}
+
+func TestResolveDefaultLANInterface(t *testing.T) {
+	t.Run("resolves interface with unambiguous LAN alias", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0", OperState: "up"},
+					{Name: "eth2", Alias: "LAN", OperState: "up"},
+				}, nil
+			},
+		}
+
+		lan := resolveDefaultLANInterface(inspector, "eth0")
+		if lan != "eth2" {
+			t.Fatalf("expected eth2, got %q", lan)
+		}
+	})
+
+	t.Run("returns empty when multiple interfaces have LAN alias", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0", OperState: "up"},
+					{Name: "eth1", Alias: "LAN", OperState: "up"},
+					{Name: "eth2", Alias: "LAN", OperState: "up"},
+				}, nil
+			},
+		}
+
+		lan := resolveDefaultLANInterface(inspector, "eth0")
+		if lan != "" {
+			t.Fatalf("expected empty string for ambiguous LAN aliases, got %q", lan)
+		}
+	})
+
+	t.Run("does not treat arbitrary bridge as LAN", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0", OperState: "up"},
+					{Name: "br0", IsBridge: true, OperState: "up"},
+				}, nil
+			},
+		}
+
+		lan := resolveDefaultLANInterface(inspector, "eth0")
+		if lan != "" {
+			t.Fatalf("expected empty string without explicit LAN role, got %q", lan)
+		}
+	})
+
+	t.Run("ignores LAN alias when operstate is down", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0", OperState: "up"},
+					{Name: "eth1", Alias: "LAN", OperState: "down"},
+				}, nil
+			},
+		}
+
+		lan := resolveDefaultLANInterface(inspector, "eth0")
+		if lan != "" {
+			t.Fatalf("expected empty string for down LAN interface, got %q", lan)
+		}
+	})
+}
+
+func TestVyOSTraceExecutorNetworkValidation(t *testing.T) {
+	runner := &fakeCommandRunner{}
+	exec := NewVyOSTraceExecutor(runner, nil)
+
+	invalidNetworks := []string{"internal", "management", "dowm", "dmz"}
+	for _, netName := range invalidNetworks {
+		t.Run("rejects unsupported network: "+netName, func(t *testing.T) {
+			msg := agentcore.ActionCommand{
+				Version: "1.0", RPCID: "rpc-invalid-net", Target: "vyos", Action: ActionTrace,
+				Payload: json.RawMessage(`{"network":"` + netName + `","uri":"http://localhost"}`),
+			}
+			_, err := exec.Execute(context.Background(), msg)
+			if !errors.Is(err, ErrInvalidActionPayload) {
+				t.Fatalf("expected ErrInvalidActionPayload, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "unsupported network") {
+				t.Fatalf("expected 'unsupported network' error, got %v", err)
+			}
+		})
+	}
+}
+
 func TestVyOSTraceExecutorNetworkResolution(t *testing.T) {
 	runner := &fakeCommandRunner{}
 	exec := NewVyOSTraceExecutor(runner, nil)
 
-	// Stub resolver mimicking the new resolveNetworkInterface logic:
-	// - "up" or "" returns WAN ("br0")
-	// - "down" or "lan" returns LAN ("br1") if present, else ""
-	// - never silently returns WAN when LAN is requested
-	hasLAN := false
-	exec.routeResolver = func(network string) string {
-		netLower := strings.ToLower(strings.TrimSpace(network))
-		if netLower == "down" || netLower == "lan" {
-			if hasLAN {
-				return "br1"
+	var hasLAN bool
+	inspector := &fakeNetworkInspector{
+		defaultRouteDevFn: func(ctx context.Context) (string, error) {
+			return "br0", nil
+		},
+		netInterfacesFn: func() ([]InterfaceInfo, error) {
+			itfs := []InterfaceInfo{
+				{Name: "br0", OperState: "up"},
 			}
-			return ""
-		}
-		return "br0"
+			if hasLAN {
+				itfs = append(itfs, InterfaceInfo{Name: "br1", Alias: "LAN", OperState: "up"})
+			}
+			return itfs, nil
+		},
 	}
+	exec.inspector = inspector
 
 	t.Run("resolves wan when network up", func(t *testing.T) {
 		msg := agentcore.ActionCommand{
 			Version: "1.0", RPCID: "rpc-up", Target: "vyos", Action: ActionTrace,
 			Payload: json.RawMessage(`{"network":"up","uri":"http://localhost"}`),
 		}
-		// Fails at HTTP upload since server not running, but verifies interface resolved to br0
 		_, err := exec.Execute(context.Background(), msg)
 		if err == nil || strings.Contains(err.Error(), "interface is required") {
 			t.Fatalf("expected upload failure after resolving interface, got %v", err)

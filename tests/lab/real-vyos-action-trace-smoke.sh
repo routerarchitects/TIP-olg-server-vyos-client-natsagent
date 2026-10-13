@@ -40,7 +40,8 @@ Required environment:
   STATE_PATH=/tmp/vyos-nats-agent/state.json
 
 Optional environment:
-  INTERFACE=eth0
+  INTERFACE=eth0 (or unset/empty to exercise automatic network discovery)
+  NETWORK=       (optional network role: "up" or "down"/"lan" when INTERFACE is omitted)
   DURATION=5
   PACKETS=20
   ARTIFACT_DIR=tests/lab/artifacts/manual-run
@@ -76,7 +77,8 @@ VYOS_USER="${VYOS_USER:-}"
 VYOS_PASSWORD="${VYOS_PASSWORD:-}"
 VYOS_SSH_KEY="${VYOS_SSH_KEY:-}"
 STATE_PATH="${STATE_PATH:-}"
-INTERFACE="${INTERFACE:-eth0}"
+INTERFACE="${INTERFACE-eth0}"
+NETWORK="${NETWORK:-}"
 DURATION="${DURATION:-5}"
 PACKETS="${PACKETS:-20}"
 ARTIFACT_DIR="${ARTIFACT_DIR:-${ROOT_DIR}/tests/lab/artifacts/real-vyos-action-trace-$(date +%Y%m%dT%H%M%SZ)}"
@@ -140,6 +142,7 @@ write_environment_summary() {
     echo "vyos_ssh_key_set=$([[ -n "${VYOS_SSH_KEY}" ]] && echo true || echo false)"
     echo "state_path=${STATE_PATH}"
     echo "interface=${INTERFACE}"
+    echo "network=${NETWORK}"
     echo "duration=${DURATION}"
     echo "packets=${PACKETS}"
     echo "artifact_dir=${ARTIFACT_DIR}"
@@ -254,6 +257,7 @@ import (
 func main() {
 	var configPath string
 	var iface string
+	var network string
 	var duration int
 	var packets int
 	var rpcID string
@@ -263,7 +267,8 @@ func main() {
 	var uploadHost string
 
 	flag.StringVar(&configPath, "config", "", "Path to controller YAML config")
-	flag.StringVar(&iface, "interface", "eth0", "Interface to trace")
+	flag.StringVar(&iface, "interface", "", "Interface to trace (optional if network specified)")
+	flag.StringVar(&network, "network", "", "Network role (up or down)")
 	flag.IntVar(&duration, "duration", 5, "Trace duration in seconds")
 	flag.IntVar(&packets, "packets", 20, "Trace packet limit")
 	flag.StringVar(&rpcID, "rpc-id", "", "RPC ID")
@@ -433,10 +438,15 @@ func main() {
 	}()
 
 	payloadMap := map[string]any{
-		"interface": iface,
 		"duration":  duration,
 		"packets":   packets,
 		"uri":       uploadURL,
+	}
+	if iface != "" {
+		payloadMap["interface"] = iface
+	}
+	if network != "" {
+		payloadMap["network"] = network
 	}
 	payloadBytes, err := json.Marshal(payloadMap)
 	if err != nil {
@@ -492,6 +502,15 @@ func main() {
 					fatalf("action failed result: error_code=%s message=%q", msg.ErrorCode, msg.Message)
 				}
 				fmt.Printf("[CONTROLLER] result success: %s\n", msg.Message)
+				var resPayload struct {
+					Interface string `json:"interface"`
+				}
+				if len(msg.Payload) > 0 {
+					_ = json.Unmarshal(msg.Payload, &resPayload)
+					if resPayload.Interface != "" {
+						fmt.Printf("[CONTROLLER] trace executed on interface: %s\n", resPayload.Interface)
+					}
+				}
 				gotSuccessResult = true
 			}
 			if gotCompletedStatus && gotSuccessResult && uploadCompleted {
@@ -533,10 +552,11 @@ func fatalf(format string, args ...any) {
 GO
 
 echo "[INFO] submitting real action trace through NATS"
-record_command "go run controller --config <tmp> --interface ${INTERFACE} --duration ${DURATION} --packets ${PACKETS} --rpc-id ${RPC_ID}"
+record_command "go run controller --config <tmp> --interface ${INTERFACE} --network ${NETWORK} --duration ${DURATION} --packets ${PACKETS} --rpc-id ${RPC_ID}"
 if ! go run "${CONTROLLER_DIR}" \
   --config "${TMP_CONFIG}" \
   --interface "${INTERFACE}" \
+  --network "${NETWORK}" \
   --duration "${DURATION}" \
   --packets "${PACKETS}" \
   --rpc-id "${RPC_ID}" \
@@ -558,7 +578,8 @@ cat > "${ARTIFACT_DIR}/phase9-summary.md" <<EOF
 
 - Target: ${TARGET}
 - RPC ID: ${RPC_ID}
-- Interface: ${INTERFACE}
+- Interface: ${INTERFACE:-auto}
+- Network: ${NETWORK:-auto}
 - Duration: ${DURATION}s
 - Packets: ${PACKETS}
 - State path: ${STATE_PATH}

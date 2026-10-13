@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -57,10 +58,137 @@ func (r *RealCommandRunner) Command(ctx context.Context, name string, args ...st
 	}
 }
 
+type NetworkInspector interface {
+	DefaultRouteDev(ctx context.Context) (string, error)
+	ProcNetRoute() ([]byte, error)
+	NetInterfaces() ([]InterfaceInfo, error)
+}
+
+type InterfaceInfo struct {
+	Name      string
+	Alias     string
+	IsBridge  bool
+	OperState string
+	Flags     uint32
+}
+
+type systemNetworkInspector struct{}
+
+// parseDefaultRouteFromIPRoute parses lines from `ip -4 route show default` (or `ip route show default`)
+// and returns the interface of the default route with the lowest metric.
+func parseDefaultRouteFromIPRoute(out []byte) string {
+	lines := strings.Split(string(out), "\n")
+	var bestIface string
+	bestMetric := int(^uint(0) >> 1)
+	found := false
+
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "default") {
+			continue
+		}
+		fields := strings.Fields(line)
+		var dev string
+		metric := 0
+		for i := 0; i < len(fields); i++ {
+			if fields[i] == "dev" && i+1 < len(fields) {
+				dev = fields[i+1]
+			}
+			if fields[i] == "metric" && i+1 < len(fields) {
+				if m, err := strconv.Atoi(fields[i+1]); err == nil {
+					metric = m
+				}
+			}
+		}
+		if dev != "" && dev != "lo" {
+			if !found || metric < bestMetric {
+				bestMetric = metric
+				bestIface = dev
+				found = true
+			}
+		}
+	}
+	return bestIface
+}
+
+func (s *systemNetworkInspector) DefaultRouteDev(ctx context.Context) (string, error) {
+	out, err := exec.CommandContext(ctx, "/sbin/ip", "-4", "route", "show", "default").Output()
+	if err != nil {
+		return "", err
+	}
+	dev := parseDefaultRouteFromIPRoute(out)
+	if dev != "" {
+		return dev, nil
+	}
+	return "", errors.New("no default route dev found in ip route output")
+}
+
+func (s *systemNetworkInspector) ProcNetRoute() ([]byte, error) {
+	return os.ReadFile("/proc/net/route")
+}
+
+func (s *systemNetworkInspector) NetInterfaces() ([]InterfaceInfo, error) {
+	entries, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		itfs, netErr := net.Interfaces()
+		if netErr != nil {
+			return nil, err
+		}
+		var res []InterfaceInfo
+		for _, iface := range itfs {
+			if (iface.Flags & net.FlagLoopback) != 0 {
+				continue
+			}
+			res = append(res, InterfaceInfo{
+				Name:  iface.Name,
+				Flags: uint32(iface.Flags),
+			})
+		}
+		return res, nil
+	}
+
+	var res []InterfaceInfo
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "lo" {
+			continue
+		}
+		var alias string
+		aliasBytes, err := os.ReadFile(filepath.Join("/sys/class/net", name, "ifalias"))
+		if err == nil {
+			alias = strings.TrimSpace(string(aliasBytes))
+		}
+		var operState string
+		stateBytes, err := os.ReadFile(filepath.Join("/sys/class/net", name, "operstate"))
+		if err == nil {
+			operState = strings.TrimSpace(string(stateBytes))
+		}
+		_, errBridge := os.Stat(filepath.Join("/sys/class/net", name, "bridge"))
+		isBridge := (errBridge == nil)
+
+		var flags uint32
+		flagsBytes, err := os.ReadFile(filepath.Join("/sys/class/net", name, "flags"))
+		if err == nil {
+			f, _ := strconv.ParseUint(strings.TrimSpace(string(flagsBytes)), 0, 32)
+			flags = uint32(f)
+		}
+
+		res = append(res, InterfaceInfo{
+			Name:      name,
+			Alias:     alias,
+			IsBridge:  isBridge,
+			OperState: operState,
+			Flags:     flags,
+		})
+	}
+	return res, nil
+}
+
 type VyOSTraceExecutor struct {
 	runner        CommandRunner
 	client        *http.Client
 	uploadTimeout time.Duration
+	inspector     NetworkInspector
 	routeResolver func(network string) string
 }
 
@@ -72,7 +200,8 @@ func NewVyOSTraceExecutor(runner CommandRunner, client *http.Client) *VyOSTraceE
 		runner:        runner,
 		client:        client,
 		uploadTimeout: 30 * time.Second,
-		routeResolver: resolveNetworkInterface,
+		inspector:     &systemNetworkInspector{},
+		routeResolver: nil,
 	}
 }
 
@@ -84,50 +213,11 @@ type tracePayload struct {
 	URI       string `json:"uri"`
 }
 
-// resolveDefaultWANInterface detects the active primary WAN interface using:
-// 1. Interface alias check (ifalias == "WAN")
-// 2. Kernel route query via `ip route get 8.8.8.8` (respects metrics, multipath, VRF/PBR)
-// 3. /proc/net/route fallback parsing with RTF_UP (0x1) validation and lowest metric priority.
-func resolveDefaultWANInterface() string {
-	// 1. Check if any active interface explicitly declares alias "WAN"
-	if entries, err := os.ReadDir("/sys/class/net"); err == nil {
-		for _, entry := range entries {
-			name := entry.Name()
-			if name == "lo" {
-				continue
-			}
-			aliasBytes, err := os.ReadFile(filepath.Join("/sys/class/net", name, "ifalias"))
-			if err == nil && strings.EqualFold(strings.TrimSpace(string(aliasBytes)), "wan") {
-				return name
-			}
-		}
-	}
-
-	// 2. Query kernel routing engine (handles policy routing, multipath, and lowest metric)
-	if out, err := exec.Command("/sbin/ip", "route", "get", "8.8.8.8").Output(); err == nil {
-		fields := strings.Fields(string(out))
-		for i, field := range fields {
-			if field == "dev" && i+1 < len(fields) {
-				dev := fields[i+1]
-				if dev != "lo" {
-					return dev
-				}
-			}
-		}
-	}
-
-	// 3. Fallback: Parse /proc/net/route with RTF_UP check and lowest metric tracking
-	f, err := os.Open("/proc/net/route")
-	if err != nil {
+// parseDefaultRouteFromProcNetRoute extracts the interface with the lowest metric default route (00000000) that is RTF_UP.
+func parseDefaultRouteFromProcNetRoute(content []byte) string {
+	if len(content) == 0 {
 		return ""
 	}
-	defer f.Close()
-
-	content, err := io.ReadAll(f)
-	if err != nil {
-		return ""
-	}
-
 	var bestIface string
 	bestMetric := int(^uint(0) >> 1) // math.MaxInt
 
@@ -149,6 +239,10 @@ func resolveDefaultWANInterface() string {
 			continue
 		}
 
+		if fields[0] == "lo" {
+			continue
+		}
+
 		metric, err := strconv.Atoi(fields[6])
 		if err != nil {
 			metric = 0
@@ -162,45 +256,134 @@ func resolveDefaultWANInterface() string {
 	return bestIface
 }
 
-// resolveDefaultLANInterface detects a LAN interface by checking standard Linux aliases or common bridge/LAN names.
-func resolveDefaultLANInterface(wanIface string) string {
-	// First check /sys/class/net/* for an interface with alias "LAN"
-	entries, err := os.ReadDir("/sys/class/net")
-	if err == nil {
-		for _, entry := range entries {
-			name := entry.Name()
-			if name == "lo" || name == wanIface {
-				continue
-			}
-			aliasBytes, err := os.ReadFile(filepath.Join("/sys/class/net", name, "ifalias"))
-			if err == nil && strings.EqualFold(strings.TrimSpace(string(aliasBytes)), "lan") {
-				return name
-			}
+// resolveDefaultWANInterface detects the active primary WAN interface using:
+// 1. Kernel default route query via `ip -4 route show default` (inspects 0.0.0.0/0, lowest metric)
+// 2. /proc/net/route parsing for destination 00000000 with RTF_UP (0x1) and lowest metric
+// 3. Fallback: Search interfaces for an unambiguous active interface declaring alias "WAN" (operstate "up").
+func resolveDefaultWANInterface(ctx context.Context, inspector NetworkInspector) string {
+	if inspector == nil {
+		inspector = &systemNetworkInspector{}
+	}
+
+	// 1. Inspect kernel routing table for the default route (0.0.0.0/0)
+	if dev, err := inspector.DefaultRouteDev(ctx); err == nil && dev != "" && dev != "lo" {
+		return dev
+	}
+
+	// 2. Parse /proc/net/route with RTF_UP check and lowest metric tracking for default route 00000000
+	if routeData, err := inspector.ProcNetRoute(); err == nil {
+		if dev := parseDefaultRouteFromProcNetRoute(routeData); dev != "" {
+			return dev
 		}
 	}
 
-	// Fallback to well-known LAN bridge/interface conventions if found
-	candidates := []string{"br1", "br-lan", "lan0", "eth1"}
-	for _, cand := range candidates {
-		if cand == wanIface {
-			continue
+	// 3. Fallback: Search interfaces for an unambiguous active interface declaring alias "WAN"
+	if itfs, err := inspector.NetInterfaces(); err == nil {
+		var candidates []string
+		for _, iface := range itfs {
+			if iface.Name == "lo" {
+				continue
+			}
+			// Validate suitable operational state (must be up)
+			if !strings.EqualFold(iface.OperState, "up") {
+				continue
+			}
+			if strings.EqualFold(iface.Alias, "wan") {
+				candidates = append(candidates, iface.Name)
+			}
 		}
-		if _, err := os.Stat(filepath.Join("/sys/class/net", cand)); err == nil {
-			return cand
+		// Require an unambiguous candidate
+		if len(candidates) == 1 {
+			return candidates[0]
 		}
 	}
 
 	return ""
 }
 
+// resolveDefaultLANInterface detects a LAN interface without guessing names:
+// 1. Collect all non-WAN interfaces with alias "LAN" whose operstate is usable ("up").
+// 2. Require exactly one unambiguous candidate. If 0 or >1 candidates exist, return ""
+//    (avoids guessing or treating arbitrary bridges as LAN).
+func resolveDefaultLANInterface(inspector NetworkInspector, wanIface string) string {
+	if inspector == nil {
+		inspector = &systemNetworkInspector{}
+	}
+
+	itfs, err := inspector.NetInterfaces()
+	if err != nil {
+		return ""
+	}
+
+	// Collect matching LAN aliases with usable operational state
+	var candidates []string
+	for _, iface := range itfs {
+		if iface.Name == "lo" || iface.Name == wanIface {
+			continue
+		}
+		if !strings.EqualFold(iface.OperState, "up") {
+			continue
+		}
+		if strings.EqualFold(iface.Alias, "lan") {
+			candidates = append(candidates, iface.Name)
+		}
+	}
+
+	// Require exactly one unambiguous candidate
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+
+	// Avoid guessing or treating an arbitrary bridge as LAN when unconfigured or ambiguous.
+	return ""
+}
+
 // resolveNetworkInterface resolves the interface name based on network direction ("up" for WAN, "down" for LAN).
 func resolveNetworkInterface(network string) string {
+	inspector := &systemNetworkInspector{}
 	netLower := strings.ToLower(strings.TrimSpace(network))
 	if netLower == "down" || netLower == "lan" {
-		wan := resolveDefaultWANInterface()
-		return resolveDefaultLANInterface(wan)
+		wan := resolveDefaultWANInterface(context.Background(), inspector)
+		return resolveDefaultLANInterface(inspector, wan)
 	}
-	return resolveDefaultWANInterface()
+	return resolveDefaultWANInterface(context.Background(), inspector)
+}
+
+func (e *VyOSTraceExecutor) resolveNetwork(ctx context.Context, network string) (string, error) {
+	if e.routeResolver != nil {
+		resolved := e.routeResolver(network)
+		if resolved == "" {
+			if network != "" {
+				return "", fmt.Errorf("interface is required and could not be determined for network: %s", network)
+			}
+			return "", errors.New("interface is required and could not be determined")
+		}
+		return resolved, nil
+	}
+
+	inspector := e.inspector
+	if inspector == nil {
+		inspector = &systemNetworkInspector{}
+	}
+
+	netLower := strings.ToLower(strings.TrimSpace(network))
+	if netLower == "down" || netLower == "lan" {
+		wan := resolveDefaultWANInterface(ctx, inspector)
+		lan := resolveDefaultLANInterface(inspector, wan)
+		if lan == "" {
+			return "", fmt.Errorf("interface is required and could not be determined for network: %s", network)
+		}
+		return lan, nil
+	}
+
+	wan := resolveDefaultWANInterface(ctx, inspector)
+	if wan == "" {
+		if network != "" {
+			return "", fmt.Errorf("interface is required and could not be determined for network: %s", network)
+		}
+		return "", errors.New("interface is required and could not be determined")
+	}
+	return wan, nil
 }
 
 func (e *VyOSTraceExecutor) Execute(ctx context.Context, msg agentcore.ActionCommand) (Output, error) {
@@ -228,6 +411,16 @@ func (e *VyOSTraceExecutor) Execute(ctx context.Context, msg agentcore.ActionCom
 		return Output{}, fmt.Errorf("%w: failed to unmarshal payload: %v", ErrInvalidActionPayload, err)
 	}
 
+	// Validate network parameter
+	netRaw := strings.TrimSpace(payload.Network)
+	netLower := strings.ToLower(netRaw)
+	switch netLower {
+	case "", "up", "wan", "down", "lan":
+		// valid
+	default:
+		return Output{}, fmt.Errorf("%w: unsupported network %q (allowed: up, down, lan)", ErrInvalidActionPayload, payload.Network)
+	}
+
 	// Validate parameter bounds
 	if payload.Duration < 0 || payload.Duration > maxDuration {
 		return Output{}, fmt.Errorf("%w: duration %d must be between 0 and %d seconds", ErrInvalidActionPayload, payload.Duration, maxDuration)
@@ -239,8 +432,10 @@ func (e *VyOSTraceExecutor) Execute(ctx context.Context, msg agentcore.ActionCom
 	// Resolve interface if omitted
 	interfaceName := strings.TrimSpace(payload.Interface)
 	if len(interfaceName) == 0 {
-		if e.routeResolver != nil {
-			interfaceName = e.routeResolver(payload.Network)
+		var err error
+		interfaceName, err = e.resolveNetwork(ctx, payload.Network)
+		if err != nil {
+			return Output{}, fmt.Errorf("%w: %v", ErrInvalidActionPayload, err)
 		}
 	}
 	if len(interfaceName) == 0 {
