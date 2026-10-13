@@ -57,6 +57,12 @@ func (r *fakeCommandRunner) Command(ctx context.Context, name string, args ...st
 	}
 }
 
+func newTestVyOSTraceExecutor(runner CommandRunner, client *http.Client) *VyOSTraceExecutor {
+	exec := NewVyOSTraceExecutor(runner, client)
+	exec.inspector = &fakeNetworkInspector{}
+	return exec
+}
+
 /*
 TC-ACTIONS-TRACE-001
 Type: Positive
@@ -105,7 +111,7 @@ func TestVyOSTraceExecutorHappyPath(t *testing.T) {
 
 	runner := &fakeCommandRunner{}
 
-	exec := NewVyOSTraceExecutor(runner, server.Client())
+	exec := newTestVyOSTraceExecutor(runner, server.Client())
 	msg := agentcore.ActionCommand{
 		Version: "1.0",
 		RPCID:   "rpc-trace-1",
@@ -173,7 +179,7 @@ Validates:
 */
 func TestVyOSTraceExecutorPayloadValidation(t *testing.T) {
 	runner := &fakeCommandRunner{}
-	exec := NewVyOSTraceExecutor(runner, nil)
+	exec := newTestVyOSTraceExecutor(runner, nil)
 	exec.routeResolver = func(_ string) string { return "" }
 
 	cases := []struct {
@@ -267,7 +273,7 @@ func TestVyOSTraceExecutorContextCancellation(t *testing.T) {
 	// Define a runner that blocks until the context is cancelled
 	runner := &fakeCommandRunner{}
 
-	exec := NewVyOSTraceExecutor(runner, nil)
+	exec := newTestVyOSTraceExecutor(runner, nil)
 	msg := agentcore.ActionCommand{
 		Version: "1.0",
 		RPCID:   "rpc-trace-cancel",
@@ -316,7 +322,7 @@ func TestVyOSTraceExecutorHTTPFailure(t *testing.T) {
 
 	runner := &fakeCommandRunner{}
 
-	exec := NewVyOSTraceExecutor(runner, server.Client())
+	exec := newTestVyOSTraceExecutor(runner, server.Client())
 	msg := agentcore.ActionCommand{
 		Version: "1.0",
 		RPCID:   "rpc-trace-http-fail",
@@ -363,7 +369,7 @@ func TestVyOSTraceExecutorRPCTraversalSafe(t *testing.T) {
 	defer server.Close()
 
 	runner := &fakeCommandRunner{}
-	exec := NewVyOSTraceExecutor(runner, server.Client())
+	exec := newTestVyOSTraceExecutor(runner, server.Client())
 
 	msg := agentcore.ActionCommand{
 		Version: "1.0",
@@ -405,7 +411,7 @@ Validates:
 */
 func TestVyOSTraceExecutorParameterBounds(t *testing.T) {
 	runner := &fakeCommandRunner{}
-	exec := NewVyOSTraceExecutor(runner, nil)
+	exec := newTestVyOSTraceExecutor(runner, nil)
 
 	cases := []struct {
 		name    string
@@ -459,7 +465,7 @@ Validates:
 */
 func TestVyOSTraceExecutorInterfaceValidation(t *testing.T) {
 	runner := &fakeCommandRunner{}
-	exec := NewVyOSTraceExecutor(runner, nil)
+	exec := newTestVyOSTraceExecutor(runner, nil)
 
 	cases := []struct {
 		name        string
@@ -476,6 +482,27 @@ func TestVyOSTraceExecutorInterfaceValidation(t *testing.T) {
 		{"invalid command injection", "eth0;ls", true},
 		{"invalid random name", "invalidname", true},
 	}
+
+	t.Run("rejects non-existent interface", func(t *testing.T) {
+		nonExistentExec := NewVyOSTraceExecutor(runner, nil)
+		nonExistentExec.inspector = &fakeNetworkInspector{
+			interfaceExistsFn: func(name string) bool { return false },
+		}
+		msg := agentcore.ActionCommand{
+			Version: "1.0",
+			RPCID:   "rpc-1",
+			Target:  "vyos",
+			Action:  ActionTrace,
+			Payload: json.RawMessage(`{"interface":"eth99","uri":"http://localhost"}`),
+		}
+		_, err := nonExistentExec.Execute(context.Background(), msg)
+		if err == nil {
+			t.Fatal("expected error for non-existent interface, got nil")
+		}
+		if !strings.Contains(err.Error(), "does not exist") {
+			t.Fatalf("expected 'does not exist' error, got %v", err)
+		}
+	})
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -547,7 +574,7 @@ func TestVyOSTraceExecutorLargeUploadStreaming(t *testing.T) {
 	_, _ = tempFile.Write(data)
 	tempFile.Close()
 
-	exec := NewVyOSTraceExecutor(&fakeCommandRunner{}, server.Client())
+	exec := newTestVyOSTraceExecutor(&fakeCommandRunner{}, server.Client())
 	err = exec.uploadFile(context.Background(), server.URL, pcapPath)
 	if err != nil {
 		t.Fatalf("upload failed: %v", err)
@@ -578,7 +605,7 @@ func TestVyOSTraceExecutorUploadTimeout(t *testing.T) {
 	defer server.Close()
 
 	runner := &fakeCommandRunner{}
-	exec := NewVyOSTraceExecutor(runner, server.Client())
+	exec := newTestVyOSTraceExecutor(runner, server.Client())
 	exec.uploadTimeout = 50 * time.Millisecond
 
 	msg := agentcore.ActionCommand{
@@ -626,7 +653,7 @@ func TestVyOSTraceExecutorExecutionFailure(t *testing.T) {
 	runner := &fakeCommandRunner{
 		runErr: errors.New("exit status 1"),
 	}
-	exec := NewVyOSTraceExecutor(runner, nil)
+	exec := newTestVyOSTraceExecutor(runner, nil)
 
 	msg := agentcore.ActionCommand{
 		Version: "1.0",
@@ -661,7 +688,16 @@ func TestVyOSTraceExecutorExecutionFailure(t *testing.T) {
 }
 
 type fakeNetworkInspector struct {
-	netInterfacesFn func() ([]InterfaceInfo, error)
+	netInterfacesFn   func() ([]InterfaceInfo, error)
+	interfaceExistsFn func(name string) bool
+}
+
+func (f *fakeNetworkInspector) InterfaceExists(name string) bool {
+	if f.interfaceExistsFn != nil {
+		return f.interfaceExistsFn(name)
+	}
+	// Default to true in tests unless explicitly overridden
+	return true
 }
 
 func (f *fakeNetworkInspector) NetInterfaces() ([]InterfaceInfo, error) {
@@ -685,6 +721,22 @@ func TestResolveDefaultWANInterface(t *testing.T) {
 		wan := resolveDefaultWANInterface(context.Background(), inspector)
 		if wan != "eth0" {
 			t.Fatalf("expected eth0, got %q", wan)
+		}
+	})
+
+	t.Run("resolves master bridge when both bridge and slave port have wan alias", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0", Alias: "WAN", IsSlave: true, OperState: "up"},
+					{Name: "br0", Alias: "WAN", IsBridge: true, OperState: "up"},
+				}, nil
+			},
+		}
+
+		wan := resolveDefaultWANInterface(context.Background(), inspector)
+		if wan != "br0" {
+			t.Fatalf("expected br0, got %q", wan)
 		}
 	})
 
@@ -820,7 +872,7 @@ func TestResolveDefaultLANInterface(t *testing.T) {
 
 func TestVyOSTraceExecutorNetworkValidation(t *testing.T) {
 	runner := &fakeCommandRunner{}
-	exec := NewVyOSTraceExecutor(runner, nil)
+	exec := newTestVyOSTraceExecutor(runner, nil)
 
 	invalidNetworks := []string{"internal", "management", "dowm", "dmz"}
 	for _, netName := range invalidNetworks {
@@ -842,7 +894,7 @@ func TestVyOSTraceExecutorNetworkValidation(t *testing.T) {
 
 func TestVyOSTraceExecutorNetworkResolution(t *testing.T) {
 	runner := &fakeCommandRunner{}
-	exec := NewVyOSTraceExecutor(runner, nil)
+	exec := newTestVyOSTraceExecutor(runner, nil)
 
 	var hasLAN bool
 	inspector := &fakeNetworkInspector{

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -60,36 +59,29 @@ func (r *RealCommandRunner) Command(ctx context.Context, name string, args ...st
 
 type NetworkInspector interface {
 	NetInterfaces() ([]InterfaceInfo, error)
+	InterfaceExists(name string) bool
 }
 
 type InterfaceInfo struct {
 	Name      string
 	Alias     string
 	IsBridge  bool
+	IsSlave   bool
 	OperState string
 	Flags     uint32
 }
 
 type systemNetworkInspector struct{}
 
+func (s *systemNetworkInspector) InterfaceExists(name string) bool {
+	_, err := os.Stat(filepath.Join("/sys/class/net", name))
+	return err == nil
+}
+
 func (s *systemNetworkInspector) NetInterfaces() ([]InterfaceInfo, error) {
 	entries, err := os.ReadDir("/sys/class/net")
 	if err != nil {
-		itfs, netErr := net.Interfaces()
-		if netErr != nil {
-			return nil, err
-		}
-		var res []InterfaceInfo
-		for _, iface := range itfs {
-			if (iface.Flags & net.FlagLoopback) != 0 {
-				continue
-			}
-			res = append(res, InterfaceInfo{
-				Name:  iface.Name,
-				Flags: uint32(iface.Flags),
-			})
-		}
-		return res, nil
+		return nil, fmt.Errorf("read /sys/class/net: %w", err)
 	}
 
 	var res []InterfaceInfo
@@ -111,6 +103,9 @@ func (s *systemNetworkInspector) NetInterfaces() ([]InterfaceInfo, error) {
 		_, errBridge := os.Stat(filepath.Join("/sys/class/net", name, "bridge"))
 		isBridge := (errBridge == nil)
 
+		_, errMaster := os.Stat(filepath.Join("/sys/class/net", name, "master"))
+		isSlave := (errMaster == nil)
+
 		var flags uint32
 		flagsBytes, err := os.ReadFile(filepath.Join("/sys/class/net", name, "flags"))
 		if err == nil {
@@ -122,6 +117,7 @@ func (s *systemNetworkInspector) NetInterfaces() ([]InterfaceInfo, error) {
 			Name:      name,
 			Alias:     alias,
 			IsBridge:  isBridge,
+			IsSlave:   isSlave,
 			OperState: operState,
 			Flags:     flags,
 		})
@@ -160,7 +156,7 @@ type tracePayload struct {
 
 // resolveInterfaceByAlias searches available interfaces for an interface declaring targetAlias (case-insensitive).
 // It strictly requires that:
-// 1. The interface is not loopback (lo) and not excludeIface (e.g. wan interface).
+// 1. The interface is not loopback (lo), not a slave port (e.g. member of a bridge), and not excludeIface (e.g. wan interface).
 // 2. The interface is operationally up.
 // 3. Exactly one interface declares this alias (unambiguous candidate). If 0 or >1 candidates match, it returns "".
 func resolveInterfaceByAlias(inspector NetworkInspector, targetAlias, excludeIface string) string {
@@ -175,7 +171,7 @@ func resolveInterfaceByAlias(inspector NetworkInspector, targetAlias, excludeIfa
 
 	var candidates []string
 	for _, iface := range itfs {
-		if iface.Name == "lo" || iface.Name == excludeIface {
+		if iface.Name == "lo" || iface.Name == excludeIface || iface.IsSlave {
 			continue
 		}
 		if !strings.EqualFold(iface.OperState, "up") {
@@ -310,16 +306,16 @@ func (e *VyOSTraceExecutor) Execute(ctx context.Context, msg agentcore.ActionCom
 		return Output{}, fmt.Errorf("%w: invalid interface name %q", ErrInvalidActionPayload, interfaceName)
 	}
 
-	var interfaceValid bool
-	if _, err := os.Stat("/sys/class/net/" + interfaceName); err == nil {
-		interfaceValid = true
-	} else {
-		if vyosInterfaceRegex.MatchString(interfaceName) {
-			interfaceValid = true
-		}
-	}
-	if !interfaceValid {
+	if !vyosInterfaceRegex.MatchString(interfaceName) {
 		return Output{}, fmt.Errorf("%w: invalid interface name %q", ErrInvalidActionPayload, interfaceName)
+	}
+
+	inspector := e.inspector
+	if inspector == nil {
+		inspector = &systemNetworkInspector{}
+	}
+	if !inspector.InterfaceExists(interfaceName) {
+		return Output{}, fmt.Errorf("%w: interface %q does not exist", ErrInvalidActionPayload, interfaceName)
 	}
 	payload.Interface = interfaceName
 
