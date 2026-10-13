@@ -659,3 +659,70 @@ func TestVyOSTraceExecutorExecutionFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestVyOSTraceExecutorNetworkResolution(t *testing.T) {
+	runner := &fakeCommandRunner{}
+	exec := NewVyOSTraceExecutor(runner, nil)
+
+	// Stub resolver mimicking the new resolveNetworkInterface logic:
+	// - "up" or "" returns WAN ("br0")
+	// - "down" or "lan" returns LAN ("br1") if present, else ""
+	// - never silently returns WAN when LAN is requested
+	hasLAN := false
+	exec.routeResolver = func(network string) string {
+		netLower := strings.ToLower(strings.TrimSpace(network))
+		if netLower == "down" || netLower == "lan" {
+			if hasLAN {
+				return "br1"
+			}
+			return ""
+		}
+		return "br0"
+	}
+
+	t.Run("resolves wan when network up", func(t *testing.T) {
+		msg := agentcore.ActionCommand{
+			Version: "1.0", RPCID: "rpc-up", Target: "vyos", Action: ActionTrace,
+			Payload: json.RawMessage(`{"network":"up","uri":"http://localhost"}`),
+		}
+		// Fails at HTTP upload since server not running, but verifies interface resolved to br0
+		_, err := exec.Execute(context.Background(), msg)
+		if err == nil || strings.Contains(err.Error(), "interface is required") {
+			t.Fatalf("expected upload failure after resolving interface, got %v", err)
+		}
+		if runner.lastArgs[2] != "br0" {
+			t.Fatalf("expected tcpdump interface br0, got %s", runner.lastArgs[2])
+		}
+	})
+
+	t.Run("resolves lan when network down and lan exists", func(t *testing.T) {
+		hasLAN = true
+		msg := agentcore.ActionCommand{
+			Version: "1.0", RPCID: "rpc-down", Target: "vyos", Action: ActionTrace,
+			Payload: json.RawMessage(`{"network":"down","uri":"http://localhost"}`),
+		}
+		_, err := exec.Execute(context.Background(), msg)
+		if err == nil || strings.Contains(err.Error(), "interface is required") {
+			t.Fatalf("expected upload failure after resolving interface, got %v", err)
+		}
+		if runner.lastArgs[2] != "br1" {
+			t.Fatalf("expected tcpdump interface br1, got %s", runner.lastArgs[2])
+		}
+	})
+
+	t.Run("fails when network down and lan cannot be determined", func(t *testing.T) {
+		hasLAN = false
+		msg := agentcore.ActionCommand{
+			Version: "1.0", RPCID: "rpc-down-fail", Target: "vyos", Action: ActionTrace,
+			Payload: json.RawMessage(`{"network":"down","uri":"http://localhost"}`),
+		}
+		_, err := exec.Execute(context.Background(), msg)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "interface is required and could not be determined") {
+			t.Fatalf("unexpected error message: %v", err)
+		}
+	})
+}
+

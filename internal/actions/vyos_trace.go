@@ -26,7 +26,7 @@ const (
 )
 
 var (
-	vyosInterfaceRegex = regexp.MustCompile(`^(eth|bond|dum|vlan|wlan|lo)[0-9]+(\.[0-9]+)?$`)
+	vyosInterfaceRegex = regexp.MustCompile(`^(eth|bond|dum|vlan|wlan|lo|br)[0-9]+(\.[0-9]+)?$`)
 )
 
 type Command interface {
@@ -84,8 +84,39 @@ type tracePayload struct {
 	URI       string `json:"uri"`
 }
 
-// resolveDefaultWANInterface detects the default gateway WAN interface by reading /proc/net/route.
+// resolveDefaultWANInterface detects the active primary WAN interface using:
+// 1. Interface alias check (ifalias == "WAN")
+// 2. Kernel route query via `ip route get 8.8.8.8` (respects metrics, multipath, VRF/PBR)
+// 3. /proc/net/route fallback parsing with RTF_UP (0x1) validation and lowest metric priority.
 func resolveDefaultWANInterface() string {
+	// 1. Check if any active interface explicitly declares alias "WAN"
+	if entries, err := os.ReadDir("/sys/class/net"); err == nil {
+		for _, entry := range entries {
+			name := entry.Name()
+			if name == "lo" {
+				continue
+			}
+			aliasBytes, err := os.ReadFile(filepath.Join("/sys/class/net", name, "ifalias"))
+			if err == nil && strings.EqualFold(strings.TrimSpace(string(aliasBytes)), "wan") {
+				return name
+			}
+		}
+	}
+
+	// 2. Query kernel routing engine (handles policy routing, multipath, and lowest metric)
+	if out, err := exec.Command("/sbin/ip", "route", "get", "8.8.8.8").Output(); err == nil {
+		fields := strings.Fields(string(out))
+		for i, field := range fields {
+			if field == "dev" && i+1 < len(fields) {
+				dev := fields[i+1]
+				if dev != "lo" {
+					return dev
+				}
+			}
+		}
+	}
+
+	// 3. Fallback: Parse /proc/net/route with RTF_UP check and lowest metric tracking
 	f, err := os.Open("/proc/net/route")
 	if err != nil {
 		return ""
@@ -97,19 +128,38 @@ func resolveDefaultWANInterface() string {
 		return ""
 	}
 
+	var bestIface string
+	bestMetric := int(^uint(0) >> 1) // math.MaxInt
+
 	lines := strings.Split(string(content), "\n")
 	for i, line := range lines {
 		if i == 0 || strings.TrimSpace(line) == "" {
 			continue
 		}
 		fields := strings.Fields(line)
-		// /proc/net/route columns: Iface, Destination, Gateway, Flags, ...
-		// Destination "00000000" represents the default route (0.0.0.0)
-		if len(fields) >= 2 && fields[1] == "00000000" {
-			return fields[0]
+		// /proc/net/route columns:
+		// 0: Iface, 1: Destination, 2: Gateway, 3: Flags, 4: RefCnt, 5: Use, 6: Metric, 7: Mask...
+		if len(fields) < 7 || fields[1] != "00000000" {
+			continue
+		}
+
+		// Ensure RTF_UP (0x0001) flag is set
+		flags, err := strconv.ParseUint(fields[3], 16, 32)
+		if err != nil || (flags&0x0001) == 0 {
+			continue
+		}
+
+		metric, err := strconv.Atoi(fields[6])
+		if err != nil {
+			metric = 0
+		}
+
+		if metric < bestMetric {
+			bestMetric = metric
+			bestIface = fields[0]
 		}
 	}
-	return ""
+	return bestIface
 }
 
 // resolveDefaultLANInterface detects a LAN interface by checking standard Linux aliases or common bridge/LAN names.
@@ -119,7 +169,7 @@ func resolveDefaultLANInterface(wanIface string) string {
 	if err == nil {
 		for _, entry := range entries {
 			name := entry.Name()
-			if name == "lo" || name == wanIface || strings.HasPrefix(name, "eth3") {
+			if name == "lo" || name == wanIface {
 				continue
 			}
 			aliasBytes, err := os.ReadFile(filepath.Join("/sys/class/net", name, "ifalias"))
@@ -145,15 +195,12 @@ func resolveDefaultLANInterface(wanIface string) string {
 
 // resolveNetworkInterface resolves the interface name based on network direction ("up" for WAN, "down" for LAN).
 func resolveNetworkInterface(network string) string {
-	wan := resolveDefaultWANInterface()
 	netLower := strings.ToLower(strings.TrimSpace(network))
 	if netLower == "down" || netLower == "lan" {
-		lan := resolveDefaultLANInterface(wan)
-		if lan != "" {
-			return lan
-		}
+		wan := resolveDefaultWANInterface()
+		return resolveDefaultLANInterface(wan)
 	}
-	return wan
+	return resolveDefaultWANInterface()
 }
 
 func (e *VyOSTraceExecutor) Execute(ctx context.Context, msg agentcore.ActionCommand) (Output, error) {
