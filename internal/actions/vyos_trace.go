@@ -302,9 +302,9 @@ func resolveDefaultWANInterface(ctx context.Context, inspector NetworkInspector)
 }
 
 // resolveDefaultLANInterface detects a LAN interface without guessing names:
-// 1. Collect all non-WAN interfaces with alias "LAN" whose operstate is usable ("up").
-// 2. Require exactly one unambiguous candidate. If 0 or >1 candidates exist, return ""
-//    (avoids guessing or treating arbitrary bridges as LAN).
+//  1. Collect all non-WAN interfaces with alias "LAN" whose operstate is usable ("up").
+//  2. Require exactly one unambiguous candidate. If 0 or >1 candidates exist, return ""
+//     (avoids guessing or treating arbitrary bridges as LAN).
 func resolveDefaultLANInterface(inspector NetworkInspector, wanIface string) string {
 	if inspector == nil {
 		inspector = &systemNetworkInspector{}
