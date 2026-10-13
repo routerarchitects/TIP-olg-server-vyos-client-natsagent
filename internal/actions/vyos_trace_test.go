@@ -725,4 +725,3 @@ func TestVyOSTraceExecutorNetworkResolution(t *testing.T) {
 		}
 	})
 }
-
