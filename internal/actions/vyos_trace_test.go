@@ -910,6 +910,22 @@ func TestResolveDefaultLANInterface(t *testing.T) {
 		}
 	})
 
+	t.Run("resolves dedicated LAN bridge named br-lan when no alias exists", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0", OperState: "up"},
+					{Name: "br-lan", IsBridge: true, OperState: "up"},
+				}, nil
+			},
+		}
+
+		lan := resolveDefaultLANInterface(inspector, "eth0")
+		if lan != "br-lan" {
+			t.Fatalf("expected br-lan, got %q", lan)
+		}
+	})
+
 	t.Run("ignores LAN alias when operstate is down", func(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {

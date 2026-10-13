@@ -301,10 +301,12 @@ func resolveDefaultWANInterface(ctx context.Context, inspector NetworkInspector)
 	return ""
 }
 
-// resolveDefaultLANInterface detects a LAN interface without guessing names:
-//  1. Collect all non-WAN interfaces with alias "LAN" whose operstate is usable ("up").
-//  2. Require exactly one unambiguous candidate. If 0 or >1 candidates exist, return ""
-//     (avoids guessing or treating arbitrary bridges as LAN).
+// resolveDefaultLANInterface detects a LAN interface without guessing arbitrary names:
+//  1. Check for interface (or bridge) with alias/description "LAN" (operstate "up").
+//     If exactly one matches, return it.
+//  2. If none has the "LAN" alias, check for a dedicated LAN bridge named "br-lan" or "br_lan" (operstate "up").
+//     If exactly one matches, return it.
+//  3. If none or ambiguous, return "" (requires user to specify interface explicitly).
 func resolveDefaultLANInterface(inspector NetworkInspector, wanIface string) string {
 	if inspector == nil {
 		inspector = &systemNetworkInspector{}
@@ -315,8 +317,8 @@ func resolveDefaultLANInterface(inspector NetworkInspector, wanIface string) str
 		return ""
 	}
 
-	// Collect matching LAN aliases with usable operational state
-	var candidates []string
+	// 1. Priority 1: Interfaces or bridges explicitly labeled with alias "LAN"
+	var aliasCandidates []string
 	for _, iface := range itfs {
 		if iface.Name == "lo" || iface.Name == wanIface {
 			continue
@@ -325,16 +327,35 @@ func resolveDefaultLANInterface(inspector NetworkInspector, wanIface string) str
 			continue
 		}
 		if strings.EqualFold(iface.Alias, "lan") {
-			candidates = append(candidates, iface.Name)
+			aliasCandidates = append(aliasCandidates, iface.Name)
 		}
 	}
-
-	// Require exactly one unambiguous candidate
-	if len(candidates) == 1 {
-		return candidates[0]
+	if len(aliasCandidates) == 1 {
+		return aliasCandidates[0]
+	}
+	if len(aliasCandidates) > 1 {
+		// Multiple interfaces configured with LAN alias is ambiguous
+		return ""
 	}
 
-	// Avoid guessing or treating an arbitrary bridge as LAN when unconfigured or ambiguous.
+	// 2. Priority 2: Bridge interface explicitly named for LAN (e.g. "br-lan" or "br_lan")
+	var bridgeCandidates []string
+	for _, iface := range itfs {
+		if iface.Name == "lo" || iface.Name == wanIface {
+			continue
+		}
+		if !strings.EqualFold(iface.OperState, "up") {
+			continue
+		}
+		nameLower := strings.ToLower(iface.Name)
+		if iface.IsBridge && (nameLower == "br-lan" || nameLower == "br_lan") {
+			bridgeCandidates = append(bridgeCandidates, iface.Name)
+		}
+	}
+	if len(bridgeCandidates) == 1 {
+		return bridgeCandidates[0]
+	}
+
 	return ""
 }
 
