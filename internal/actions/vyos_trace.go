@@ -59,8 +59,6 @@ func (r *RealCommandRunner) Command(ctx context.Context, name string, args ...st
 }
 
 type NetworkInspector interface {
-	DefaultRouteDev(ctx context.Context) (string, error)
-	ProcNetRoute() ([]byte, error)
 	NetInterfaces() ([]InterfaceInfo, error)
 }
 
@@ -73,59 +71,6 @@ type InterfaceInfo struct {
 }
 
 type systemNetworkInspector struct{}
-
-// parseDefaultRouteFromIPRoute parses lines from `ip -4 route show default` (or `ip route show default`)
-// and returns the interface of the default route with the lowest metric.
-func parseDefaultRouteFromIPRoute(out []byte) string {
-	lines := strings.Split(string(out), "\n")
-	var bestIface string
-	bestMetric := int(^uint(0) >> 1)
-	found := false
-
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "default") {
-			continue
-		}
-		fields := strings.Fields(line)
-		var dev string
-		metric := 0
-		for i := 0; i < len(fields); i++ {
-			if fields[i] == "dev" && i+1 < len(fields) {
-				dev = fields[i+1]
-			}
-			if fields[i] == "metric" && i+1 < len(fields) {
-				if m, err := strconv.Atoi(fields[i+1]); err == nil {
-					metric = m
-				}
-			}
-		}
-		if dev != "" && dev != "lo" {
-			if !found || metric < bestMetric {
-				bestMetric = metric
-				bestIface = dev
-				found = true
-			}
-		}
-	}
-	return bestIface
-}
-
-func (s *systemNetworkInspector) DefaultRouteDev(ctx context.Context) (string, error) {
-	out, err := exec.CommandContext(ctx, "/sbin/ip", "-4", "route", "show", "default").Output()
-	if err != nil {
-		return "", err
-	}
-	dev := parseDefaultRouteFromIPRoute(out)
-	if dev != "" {
-		return dev, nil
-	}
-	return "", errors.New("no default route dev found in ip route output")
-}
-
-func (s *systemNetworkInspector) ProcNetRoute() ([]byte, error) {
-	return os.ReadFile("/proc/net/route")
-}
 
 func (s *systemNetworkInspector) NetInterfaces() ([]InterfaceInfo, error) {
 	entries, err := os.ReadDir("/sys/class/net")
@@ -213,101 +158,12 @@ type tracePayload struct {
 	URI       string `json:"uri"`
 }
 
-// parseDefaultRouteFromProcNetRoute extracts the interface with the lowest metric default route (00000000) that is RTF_UP.
-func parseDefaultRouteFromProcNetRoute(content []byte) string {
-	if len(content) == 0 {
-		return ""
-	}
-	var bestIface string
-	bestMetric := int(^uint(0) >> 1) // math.MaxInt
-
-	lines := strings.Split(string(content), "\n")
-	for i, line := range lines {
-		if i == 0 || strings.TrimSpace(line) == "" {
-			continue
-		}
-		fields := strings.Fields(line)
-		// /proc/net/route columns:
-		// 0: Iface, 1: Destination, 2: Gateway, 3: Flags, 4: RefCnt, 5: Use, 6: Metric, 7: Mask...
-		if len(fields) < 7 || fields[1] != "00000000" {
-			continue
-		}
-
-		// Ensure RTF_UP (0x0001) flag is set
-		flags, err := strconv.ParseUint(fields[3], 16, 32)
-		if err != nil || (flags&0x0001) == 0 {
-			continue
-		}
-
-		if fields[0] == "lo" {
-			continue
-		}
-
-		metric, err := strconv.Atoi(fields[6])
-		if err != nil {
-			metric = 0
-		}
-
-		if metric < bestMetric {
-			bestMetric = metric
-			bestIface = fields[0]
-		}
-	}
-	return bestIface
-}
-
-// resolveDefaultWANInterface detects the active primary WAN interface using:
-// 1. Kernel default route query via `ip -4 route show default` (inspects 0.0.0.0/0, lowest metric)
-// 2. /proc/net/route parsing for destination 00000000 with RTF_UP (0x1) and lowest metric
-// 3. Fallback: Search interfaces for an unambiguous active interface declaring alias "WAN" (operstate "up").
-func resolveDefaultWANInterface(ctx context.Context, inspector NetworkInspector) string {
-	if inspector == nil {
-		inspector = &systemNetworkInspector{}
-	}
-
-	// 1. Inspect kernel routing table for the default route (0.0.0.0/0)
-	if dev, err := inspector.DefaultRouteDev(ctx); err == nil && dev != "" && dev != "lo" {
-		return dev
-	}
-
-	// 2. Parse /proc/net/route with RTF_UP check and lowest metric tracking for default route 00000000
-	if routeData, err := inspector.ProcNetRoute(); err == nil {
-		if dev := parseDefaultRouteFromProcNetRoute(routeData); dev != "" {
-			return dev
-		}
-	}
-
-	// 3. Fallback: Search interfaces for an unambiguous active interface declaring alias "WAN"
-	if itfs, err := inspector.NetInterfaces(); err == nil {
-		var candidates []string
-		for _, iface := range itfs {
-			if iface.Name == "lo" {
-				continue
-			}
-			// Validate suitable operational state (must be up)
-			if !strings.EqualFold(iface.OperState, "up") {
-				continue
-			}
-			if strings.EqualFold(iface.Alias, "wan") {
-				candidates = append(candidates, iface.Name)
-			}
-		}
-		// Require an unambiguous candidate
-		if len(candidates) == 1 {
-			return candidates[0]
-		}
-	}
-
-	return ""
-}
-
-// resolveDefaultLANInterface detects a LAN interface without guessing arbitrary names:
-//  1. Check for interface (or bridge) with alias/description "LAN" (operstate "up").
-//     If exactly one matches, return it.
-//  2. If none has the "LAN" alias, check for a dedicated LAN bridge named "br-lan" or "br_lan" (operstate "up").
-//     If exactly one matches, return it.
-//  3. If none or ambiguous, return "" (requires user to specify interface explicitly).
-func resolveDefaultLANInterface(inspector NetworkInspector, wanIface string) string {
+// resolveInterfaceByAlias searches available interfaces for an interface declaring targetAlias (case-insensitive).
+// It strictly requires that:
+// 1. The interface is not loopback (lo) and not excludeIface (e.g. wan interface).
+// 2. The interface is operationally up.
+// 3. Exactly one interface declares this alias (unambiguous candidate). If 0 or >1 candidates match, it returns "".
+func resolveInterfaceByAlias(inspector NetworkInspector, targetAlias, excludeIface string) string {
 	if inspector == nil {
 		inspector = &systemNetworkInspector{}
 	}
@@ -317,46 +173,34 @@ func resolveDefaultLANInterface(inspector NetworkInspector, wanIface string) str
 		return ""
 	}
 
-	// 1. Priority 1: Interfaces or bridges explicitly labeled with alias "LAN"
-	var aliasCandidates []string
+	var candidates []string
 	for _, iface := range itfs {
-		if iface.Name == "lo" || iface.Name == wanIface {
+		if iface.Name == "lo" || iface.Name == excludeIface {
 			continue
 		}
 		if !strings.EqualFold(iface.OperState, "up") {
 			continue
 		}
-		if strings.EqualFold(iface.Alias, "lan") {
-			aliasCandidates = append(aliasCandidates, iface.Name)
+		if strings.EqualFold(iface.Alias, targetAlias) {
+			candidates = append(candidates, iface.Name)
 		}
-	}
-	if len(aliasCandidates) == 1 {
-		return aliasCandidates[0]
-	}
-	if len(aliasCandidates) > 1 {
-		// Multiple interfaces configured with LAN alias is ambiguous
-		return ""
 	}
 
-	// 2. Priority 2: Bridge interface explicitly named for LAN (e.g. "br-lan" or "br_lan")
-	var bridgeCandidates []string
-	for _, iface := range itfs {
-		if iface.Name == "lo" || iface.Name == wanIface {
-			continue
-		}
-		if !strings.EqualFold(iface.OperState, "up") {
-			continue
-		}
-		nameLower := strings.ToLower(iface.Name)
-		if iface.IsBridge && (nameLower == "br-lan" || nameLower == "br_lan") {
-			bridgeCandidates = append(bridgeCandidates, iface.Name)
-		}
-	}
-	if len(bridgeCandidates) == 1 {
-		return bridgeCandidates[0]
+	if len(candidates) == 1 {
+		return candidates[0]
 	}
 
 	return ""
+}
+
+// resolveDefaultWANInterface resolves the WAN interface strictly via alias "WAN" (operstate "up").
+func resolveDefaultWANInterface(ctx context.Context, inspector NetworkInspector) string {
+	return resolveInterfaceByAlias(inspector, "wan", "")
+}
+
+// resolveDefaultLANInterface resolves the LAN interface strictly via alias "LAN" (operstate "up").
+func resolveDefaultLANInterface(inspector NetworkInspector, wanIface string) string {
+	return resolveInterfaceByAlias(inspector, "lan", wanIface)
 }
 
 // resolveNetworkInterface resolves the interface name based on network direction ("up" for WAN, "down" for LAN).
