@@ -21,12 +21,13 @@ import (
 )
 
 const (
-	maxDuration = 300
-	maxPackets  = 10000
+	maxDuration          = 300
+	maxPackets           = 10000
+	maxInterfaceNameLen  = 15 // Linux IFNAMSIZ - 1
 )
 
 var (
-	vyosInterfaceRegex = regexp.MustCompile(`^(eth|bond|dum|vlan|wlan|lo|br)[0-9]+(\.[0-9]+)?$`)
+	safeInterfaceRegex = regexp.MustCompile(`^[a-zA-Z0-9_.:@-]+$`)
 )
 
 type Command interface {
@@ -156,10 +157,9 @@ type tracePayload struct {
 
 // resolveInterfaceByAlias searches available interfaces for an interface declaring targetAlias (case-insensitive).
 // It strictly requires that:
-// 1. The interface is not loopback (lo), not a slave port (e.g. member of a bridge), and not excludeIface (e.g. wan interface).
-// 2. The interface is administratively up (Flags has IFF_UP 0x1, or operstate is not down).
-// 3. Exactly one interface declares this alias (unambiguous candidate). If 0 or >1 candidates match, it returns "".
-func resolveInterfaceByAlias(inspector NetworkInspector, targetAlias, excludeIface string) string {
+// 1. The interface is not loopback (lo) and not a slave port (e.g. member of a bridge).
+// 2. Exactly one interface declares this alias (unambiguous candidate). If 0 or >1 candidates match, it returns "".
+func resolveInterfaceByAlias(inspector NetworkInspector, targetAlias string) string {
 	if inspector == nil {
 		inspector = &systemNetworkInspector{}
 	}
@@ -171,12 +171,7 @@ func resolveInterfaceByAlias(inspector NetworkInspector, targetAlias, excludeIfa
 
 	var candidates []string
 	for _, iface := range itfs {
-		if iface.Name == "lo" || iface.Name == excludeIface || iface.IsSlave {
-			continue
-		}
-		// Require administrative up (IFF_UP 0x1) or operational state up
-		isUp := (iface.Flags&0x1) != 0 || strings.EqualFold(iface.OperState, "up")
-		if !isUp {
+		if iface.Name == "lo" || iface.IsSlave {
 			continue
 		}
 		if strings.EqualFold(iface.Alias, targetAlias) {
@@ -191,14 +186,14 @@ func resolveInterfaceByAlias(inspector NetworkInspector, targetAlias, excludeIfa
 	return ""
 }
 
-// resolveDefaultWANInterface resolves the WAN interface strictly via alias "WAN" (operstate "up").
+// resolveDefaultWANInterface resolves the WAN interface strictly via alias "WAN".
 func resolveDefaultWANInterface(ctx context.Context, inspector NetworkInspector) string {
-	return resolveInterfaceByAlias(inspector, "wan", "")
+	return resolveInterfaceByAlias(inspector, "wan")
 }
 
-// resolveDefaultLANInterface resolves the LAN interface strictly via alias "LAN" (operstate "up").
-func resolveDefaultLANInterface(inspector NetworkInspector, wanIface string) string {
-	return resolveInterfaceByAlias(inspector, "lan", wanIface)
+// resolveDefaultLANInterface resolves the LAN interface strictly via alias "LAN".
+func resolveDefaultLANInterface(inspector NetworkInspector) string {
+	return resolveInterfaceByAlias(inspector, "lan")
 }
 
 // resolveNetworkInterface resolves the interface name based on network direction ("up" for WAN, "down" for LAN).
@@ -206,8 +201,7 @@ func resolveNetworkInterface(network string) string {
 	inspector := &systemNetworkInspector{}
 	netLower := strings.ToLower(strings.TrimSpace(network))
 	if netLower == "down" || netLower == "lan" {
-		wan := resolveDefaultWANInterface(context.Background(), inspector)
-		return resolveDefaultLANInterface(inspector, wan)
+		return resolveDefaultLANInterface(inspector)
 	}
 	return resolveDefaultWANInterface(context.Background(), inspector)
 }
@@ -231,8 +225,7 @@ func (e *VyOSTraceExecutor) resolveNetwork(ctx context.Context, network string) 
 
 	netLower := strings.ToLower(strings.TrimSpace(network))
 	if netLower == "down" || netLower == "lan" {
-		wan := resolveDefaultWANInterface(ctx, inspector)
-		lan := resolveDefaultLANInterface(inspector, wan)
+		lan := resolveDefaultLANInterface(inspector)
 		if lan == "" {
 			return "", fmt.Errorf("interface is required and could not be determined for network: %s", network)
 		}
@@ -292,7 +285,7 @@ func (e *VyOSTraceExecutor) Execute(ctx context.Context, msg agentcore.ActionCom
 		case "", "up", "wan", "down", "lan":
 			// valid
 		default:
-			return Output{}, fmt.Errorf("%w: unsupported network %q (allowed: up, down, lan)", ErrInvalidActionPayload, payload.Network)
+			return Output{}, fmt.Errorf("%w: unsupported network %q (allowed: up, wan, down, lan)", ErrInvalidActionPayload, payload.Network)
 		}
 
 		var err error
@@ -304,11 +297,14 @@ func (e *VyOSTraceExecutor) Execute(ctx context.Context, msg agentcore.ActionCom
 	if len(interfaceName) == 0 {
 		return Output{}, fmt.Errorf("%w: interface is required and could not be determined", ErrInvalidActionPayload)
 	}
+	if len(interfaceName) > maxInterfaceNameLen {
+		return Output{}, fmt.Errorf("%w: interface name %q exceeds maximum length (%d)", ErrInvalidActionPayload, interfaceName, maxInterfaceNameLen)
+	}
 	if strings.Contains(interfaceName, "..") || strings.Contains(interfaceName, "/") || strings.Contains(interfaceName, "\\") {
 		return Output{}, fmt.Errorf("%w: invalid interface name %q", ErrInvalidActionPayload, interfaceName)
 	}
 
-	if !vyosInterfaceRegex.MatchString(interfaceName) {
+	if !safeInterfaceRegex.MatchString(interfaceName) {
 		return Output{}, fmt.Errorf("%w: invalid interface name %q", ErrInvalidActionPayload, interfaceName)
 	}
 

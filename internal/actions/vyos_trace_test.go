@@ -476,11 +476,17 @@ func TestVyOSTraceExecutorInterfaceValidation(t *testing.T) {
 		{"valid bond", "bond99", false},
 		{"valid dum", "dum1", false},
 		{"valid subinterface", "eth0.100", false},
+		{"valid pppoe", "pppoe0", false},
+		{"valid wireguard", "wg0", false},
+		{"valid bridge with hyphen", "br-lan", false},
+		{"valid tunnel", "tun0", false},
 		{"invalid slash", "eth/0", true},
 		{"invalid backslash", "eth\\0", true},
 		{"invalid dots", "eth0..1", true},
 		{"invalid command injection", "eth0;ls", true},
-		{"invalid random name", "invalidname", true},
+		{"invalid shell char pipe", "eth0|ls", true},
+		{"invalid space", "eth0 test", true},
+		{"invalid exceeds max len", "verylonginterfacename123", true},
 	}
 
 	t.Run("rejects non-existent interface", func(t *testing.T) {
@@ -523,11 +529,11 @@ func TestVyOSTraceExecutorInterfaceValidation(t *testing.T) {
 			}
 			_, err = exec.Execute(context.Background(), msg)
 			if tc.expectError {
-				if err == nil || !strings.Contains(err.Error(), "invalid interface name") {
+				if err == nil || (!strings.Contains(err.Error(), "invalid interface name") && !strings.Contains(err.Error(), "exceeds maximum length")) {
 					t.Fatalf("expected invalid interface error, got: %v", err)
 				}
 			} else {
-				if err != nil && strings.Contains(err.Error(), "invalid interface name") {
+				if err != nil && (strings.Contains(err.Error(), "invalid interface name") || strings.Contains(err.Error(), "exceeds maximum length")) {
 					t.Fatalf("unexpected interface validation failure: %v", err)
 				}
 			}
@@ -756,19 +762,19 @@ func TestResolveDefaultWANInterface(t *testing.T) {
 		}
 	})
 
-	t.Run("ignores wan alias when operstate is not up", func(t *testing.T) {
+	t.Run("resolves unambiguous wan alias regardless of link state (even if down or unknown)", func(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
-					{Name: "eth0", Alias: "WAN", OperState: "unknown"},
-					{Name: "eth1", Alias: "WAN", OperState: "down"},
+					{Name: "eth0", Alias: "WAN", OperState: "down"},
+					{Name: "eth1", OperState: "up"},
 				}, nil
 			},
 		}
 
 		wan := resolveDefaultWANInterface(context.Background(), inspector)
-		if wan != "" {
-			t.Fatalf("expected empty string for non-up WAN interface, got %q", wan)
+		if wan != "eth0" {
+			t.Fatalf("expected eth0, got %q", wan)
 		}
 	})
 
@@ -799,7 +805,7 @@ func TestResolveDefaultLANInterface(t *testing.T) {
 			},
 		}
 
-		lan := resolveDefaultLANInterface(inspector, "eth0")
+		lan := resolveDefaultLANInterface(inspector)
 		if lan != "eth2" {
 			t.Fatalf("expected eth2, got %q", lan)
 		}
@@ -816,7 +822,7 @@ func TestResolveDefaultLANInterface(t *testing.T) {
 			},
 		}
 
-		lan := resolveDefaultLANInterface(inspector, "eth0")
+		lan := resolveDefaultLANInterface(inspector)
 		if lan != "" {
 			t.Fatalf("expected empty string for ambiguous LAN aliases, got %q", lan)
 		}
@@ -832,56 +838,56 @@ func TestResolveDefaultLANInterface(t *testing.T) {
 			},
 		}
 
-		lan := resolveDefaultLANInterface(inspector, "eth0")
+		lan := resolveDefaultLANInterface(inspector)
 		if lan != "" {
 			t.Fatalf("expected empty string for bridge without LAN alias, got %q", lan)
 		}
 	})
 
-	t.Run("resolves administratively up interface even if operstate is down", func(t *testing.T) {
+	t.Run("resolves interface with unambiguous LAN alias even if down", func(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
 					{Name: "eth0", Flags: 0x1, OperState: "up"},
-					{Name: "br1", Alias: "LAN", Flags: 0x1003, OperState: "down"},
+					{Name: "br1", Alias: "LAN", Flags: 0x0, OperState: "down"},
 				}, nil
 			},
 		}
 
-		lan := resolveDefaultLANInterface(inspector, "eth0")
+		lan := resolveDefaultLANInterface(inspector)
 		if lan != "br1" {
-			t.Fatalf("expected br1 for administratively up LAN interface, got %q", lan)
+			t.Fatalf("expected br1 for LAN interface even when down, got %q", lan)
 		}
 	})
 
-	t.Run("ignores LAN alias when administratively down", func(t *testing.T) {
+	t.Run("resolves master bridge when both bridge and slave port have LAN alias", func(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
-					{Name: "eth0", Flags: 0x1, OperState: "up"},
-					{Name: "eth1", Alias: "LAN", Flags: 0x0, OperState: "down"},
+					{Name: "eth1", Alias: "LAN", IsSlave: true, OperState: "up"},
+					{Name: "br1", Alias: "LAN", IsBridge: true, OperState: "up"},
 				}, nil
 			},
 		}
 
-		lan := resolveDefaultLANInterface(inspector, "eth0")
-		if lan != "" {
-			t.Fatalf("expected empty string for administratively down LAN interface, got %q", lan)
+		lan := resolveDefaultLANInterface(inspector)
+		if lan != "br1" {
+			t.Fatalf("expected br1, got %q", lan)
 		}
 	})
 
-	t.Run("ignores WAN interface even if it has LAN alias", func(t *testing.T) {
+	t.Run("ignores loopback interface even if it has LAN alias", func(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
-					{Name: "eth0", Alias: "LAN", OperState: "up"},
+					{Name: "lo", Alias: "LAN", OperState: "up"},
 				}, nil
 			},
 		}
 
-		lan := resolveDefaultLANInterface(inspector, "eth0")
+		lan := resolveDefaultLANInterface(inspector)
 		if lan != "" {
-			t.Fatalf("expected empty string when target matches WAN interface, got %q", lan)
+			t.Fatalf("expected empty string for loopback interface, got %q", lan)
 		}
 	})
 }
