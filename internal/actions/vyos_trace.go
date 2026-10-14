@@ -157,7 +157,7 @@ type tracePayload struct {
 // resolveInterfaceByAlias searches available interfaces for an interface declaring targetAlias (case-insensitive).
 // It strictly requires that:
 // 1. The interface is not loopback (lo), not a slave port (e.g. member of a bridge), and not excludeIface (e.g. wan interface).
-// 2. The interface is operationally up.
+// 2. The interface is administratively up (Flags has IFF_UP 0x1, or operstate is not down).
 // 3. Exactly one interface declares this alias (unambiguous candidate). If 0 or >1 candidates match, it returns "".
 func resolveInterfaceByAlias(inspector NetworkInspector, targetAlias, excludeIface string) string {
 	if inspector == nil {
@@ -174,7 +174,9 @@ func resolveInterfaceByAlias(inspector NetworkInspector, targetAlias, excludeIfa
 		if iface.Name == "lo" || iface.Name == excludeIface || iface.IsSlave {
 			continue
 		}
-		if !strings.EqualFold(iface.OperState, "up") {
+		// Require administrative up (IFF_UP 0x1) or operational state up
+		isUp := (iface.Flags&0x1) != 0 || strings.EqualFold(iface.OperState, "up")
+		if !isUp {
 			continue
 		}
 		if strings.EqualFold(iface.Alias, targetAlias) {
@@ -272,16 +274,6 @@ func (e *VyOSTraceExecutor) Execute(ctx context.Context, msg agentcore.ActionCom
 		return Output{}, fmt.Errorf("%w: failed to unmarshal payload: %v", ErrInvalidActionPayload, err)
 	}
 
-	// Validate network parameter
-	netRaw := strings.TrimSpace(payload.Network)
-	netLower := strings.ToLower(netRaw)
-	switch netLower {
-	case "", "up", "wan", "down", "lan":
-		// valid
-	default:
-		return Output{}, fmt.Errorf("%w: unsupported network %q (allowed: up, down, lan)", ErrInvalidActionPayload, payload.Network)
-	}
-
 	// Validate parameter bounds
 	if payload.Duration < 0 || payload.Duration > maxDuration {
 		return Output{}, fmt.Errorf("%w: duration %d must be between 0 and %d seconds", ErrInvalidActionPayload, payload.Duration, maxDuration)
@@ -293,6 +285,16 @@ func (e *VyOSTraceExecutor) Execute(ctx context.Context, msg agentcore.ActionCom
 	// Resolve interface if omitted
 	interfaceName := strings.TrimSpace(payload.Interface)
 	if len(interfaceName) == 0 {
+		// Validate network parameter only when interface resolution is required
+		netRaw := strings.TrimSpace(payload.Network)
+		netLower := strings.ToLower(netRaw)
+		switch netLower {
+		case "", "up", "wan", "down", "lan":
+			// valid
+		default:
+			return Output{}, fmt.Errorf("%w: unsupported network %q (allowed: up, down, lan)", ErrInvalidActionPayload, payload.Network)
+		}
+
 		var err error
 		interfaceName, err = e.resolveNetwork(ctx, payload.Network)
 		if err != nil {

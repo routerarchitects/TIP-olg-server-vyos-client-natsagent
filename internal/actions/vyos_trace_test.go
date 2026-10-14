@@ -838,19 +838,35 @@ func TestResolveDefaultLANInterface(t *testing.T) {
 		}
 	})
 
-	t.Run("ignores LAN alias when operstate is down", func(t *testing.T) {
+	t.Run("resolves administratively up interface even if operstate is down", func(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
-					{Name: "eth0", OperState: "up"},
-					{Name: "eth1", Alias: "LAN", OperState: "down"},
+					{Name: "eth0", Flags: 0x1, OperState: "up"},
+					{Name: "br1", Alias: "LAN", Flags: 0x1003, OperState: "down"},
+				}, nil
+			},
+		}
+
+		lan := resolveDefaultLANInterface(inspector, "eth0")
+		if lan != "br1" {
+			t.Fatalf("expected br1 for administratively up LAN interface, got %q", lan)
+		}
+	})
+
+	t.Run("ignores LAN alias when administratively down", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0", Flags: 0x1, OperState: "up"},
+					{Name: "eth1", Alias: "LAN", Flags: 0x0, OperState: "down"},
 				}, nil
 			},
 		}
 
 		lan := resolveDefaultLANInterface(inspector, "eth0")
 		if lan != "" {
-			t.Fatalf("expected empty string for down LAN interface, got %q", lan)
+			t.Fatalf("expected empty string for administratively down LAN interface, got %q", lan)
 		}
 	})
 
@@ -890,6 +906,20 @@ func TestVyOSTraceExecutorNetworkValidation(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("allows unrecognized network if interface is explicitly provided", func(t *testing.T) {
+		msg := agentcore.ActionCommand{
+			Version: "1.0", RPCID: "rpc-explicit-net", Target: "vyos", Action: ActionTrace,
+			Payload: json.RawMessage(`{"interface":"eth0","network":"management","uri":"http://localhost"}`),
+		}
+		_, err := exec.Execute(context.Background(), msg)
+		if err == nil || strings.Contains(err.Error(), "unsupported network") {
+			t.Fatalf("expected upload failure without unsupported network error, got: %v", err)
+		}
+		if runner.lastArgs[2] != "eth0" {
+			t.Fatalf("expected interface eth0, got %s", runner.lastArgs[2])
+		}
+	})
 }
 
 func TestVyOSTraceExecutorNetworkResolution(t *testing.T) {
