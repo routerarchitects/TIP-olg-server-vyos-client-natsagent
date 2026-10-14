@@ -21,9 +21,9 @@ import (
 )
 
 const (
-	maxDuration          = 300
-	maxPackets           = 10000
-	maxInterfaceNameLen  = 15 // Linux IFNAMSIZ - 1
+	maxDuration         = 300
+	maxPackets          = 10000
+	maxInterfaceNameLen = 15 // Linux IFNAMSIZ - 1
 )
 
 var (
