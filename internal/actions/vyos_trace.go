@@ -21,12 +21,13 @@ import (
 )
 
 const (
-	maxDuration = 300
-	maxPackets  = 10000
+	maxDuration         = 300
+	maxPackets          = 10000
+	maxInterfaceNameLen = 15 // Linux IFNAMSIZ - 1
 )
 
 var (
-	vyosInterfaceRegex = regexp.MustCompile(`^(eth|bond|dum|vlan|wlan|lo)[0-9]+(\.[0-9]+)?$`)
+	safeInterfaceRegex = regexp.MustCompile(`^[a-zA-Z0-9_.:@-]+$`)
 )
 
 type Command interface {
@@ -57,10 +58,60 @@ func (r *RealCommandRunner) Command(ctx context.Context, name string, args ...st
 	}
 }
 
+type NetworkInspector interface {
+	NetInterfaces() ([]InterfaceInfo, error)
+	InterfaceExists(name string) bool
+}
+
+type InterfaceInfo struct {
+	Name    string
+	Alias   string
+	IsSlave bool
+}
+
+type systemNetworkInspector struct{}
+
+func (s *systemNetworkInspector) InterfaceExists(name string) bool {
+	_, err := os.Stat(filepath.Join("/sys/class/net", name))
+	return err == nil
+}
+
+func (s *systemNetworkInspector) NetInterfaces() ([]InterfaceInfo, error) {
+	entries, err := os.ReadDir("/sys/class/net")
+	if err != nil {
+		return nil, fmt.Errorf("read /sys/class/net: %w", err)
+	}
+
+	var res []InterfaceInfo
+	for _, entry := range entries {
+		name := entry.Name()
+		if name == "lo" {
+			continue
+		}
+		var alias string
+		aliasBytes, err := os.ReadFile(filepath.Join("/sys/class/net", name, "ifalias"))
+		if err == nil {
+			alias = strings.TrimSpace(string(aliasBytes))
+		}
+
+		_, errMaster := os.Stat(filepath.Join("/sys/class/net", name, "master"))
+		isSlave := (errMaster == nil)
+
+		res = append(res, InterfaceInfo{
+			Name:    name,
+			Alias:   alias,
+			IsSlave: isSlave,
+		})
+	}
+	return res, nil
+}
+
 type VyOSTraceExecutor struct {
 	runner        CommandRunner
 	client        *http.Client
 	uploadTimeout time.Duration
+	inspector     NetworkInspector
+	routeResolver func(network string) string
 }
 
 func NewVyOSTraceExecutor(runner CommandRunner, client *http.Client) *VyOSTraceExecutor {
@@ -71,14 +122,94 @@ func NewVyOSTraceExecutor(runner CommandRunner, client *http.Client) *VyOSTraceE
 		runner:        runner,
 		client:        client,
 		uploadTimeout: 30 * time.Second,
+		inspector:     &systemNetworkInspector{},
+		routeResolver: nil,
 	}
 }
 
 type tracePayload struct {
 	Interface string `json:"interface"`
+	Network   string `json:"network"`
 	Duration  int    `json:"duration"`
 	Packets   int    `json:"packets"`
 	URI       string `json:"uri"`
+}
+
+// resolveInterfaceByAlias searches available interfaces for an interface declaring targetAlias (case-insensitive).
+// It strictly requires that:
+// 1. The interface is not loopback (lo) and not a slave port (e.g. member of a bridge).
+// 2. Exactly one interface declares this alias (unambiguous candidate). If 0 or >1 candidates match, it returns "".
+func resolveInterfaceByAlias(inspector NetworkInspector, targetAlias string) string {
+	if inspector == nil {
+		inspector = &systemNetworkInspector{}
+	}
+
+	itfs, err := inspector.NetInterfaces()
+	if err != nil {
+		return ""
+	}
+
+	var candidates []string
+	for _, iface := range itfs {
+		if iface.Name == "lo" || iface.IsSlave {
+			continue
+		}
+		if strings.EqualFold(iface.Alias, targetAlias) {
+			candidates = append(candidates, iface.Name)
+		}
+	}
+
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+
+	return ""
+}
+
+// resolveDefaultWANInterface resolves the WAN interface strictly via alias "WAN".
+func resolveDefaultWANInterface(inspector NetworkInspector) string {
+	return resolveInterfaceByAlias(inspector, "wan")
+}
+
+// resolveDefaultLANInterface resolves the LAN interface strictly via alias "LAN".
+func resolveDefaultLANInterface(inspector NetworkInspector) string {
+	return resolveInterfaceByAlias(inspector, "lan")
+}
+
+func (e *VyOSTraceExecutor) resolveNetwork(ctx context.Context, network string) (string, error) {
+	if e.routeResolver != nil {
+		resolved := e.routeResolver(network)
+		if resolved == "" {
+			if network != "" {
+				return "", fmt.Errorf("interface is required and could not be determined for network: %s", network)
+			}
+			return "", errors.New("interface is required and could not be determined")
+		}
+		return resolved, nil
+	}
+
+	inspector := e.inspector
+	if inspector == nil {
+		inspector = &systemNetworkInspector{}
+	}
+
+	netLower := strings.ToLower(strings.TrimSpace(network))
+	if netLower == "down" || netLower == "lan" {
+		lan := resolveDefaultLANInterface(inspector)
+		if lan == "" {
+			return "", fmt.Errorf("interface is required and could not be determined for network: %s", network)
+		}
+		return lan, nil
+	}
+
+	wan := resolveDefaultWANInterface(inspector)
+	if wan == "" {
+		if network != "" {
+			return "", fmt.Errorf("interface is required and could not be determined for network: %s", network)
+		}
+		return "", errors.New("interface is required and could not be determined")
+	}
+	return wan, nil
 }
 
 func (e *VyOSTraceExecutor) Execute(ctx context.Context, msg agentcore.ActionCommand) (Output, error) {
@@ -114,26 +245,47 @@ func (e *VyOSTraceExecutor) Execute(ctx context.Context, msg agentcore.ActionCom
 		return Output{}, fmt.Errorf("%w: packets %d must be between 0 and %d", ErrInvalidActionPayload, payload.Packets, maxPackets)
 	}
 
-	// Validate interface
-	interfaceName := payload.Interface
+	// Resolve interface if omitted
+	interfaceName := strings.TrimSpace(payload.Interface)
 	if len(interfaceName) == 0 {
-		return Output{}, fmt.Errorf("%w: interface is required", ErrInvalidActionPayload)
+		// Validate network parameter only when interface resolution is required
+		netRaw := strings.TrimSpace(payload.Network)
+		netLower := strings.ToLower(netRaw)
+		switch netLower {
+		case "", "up", "wan", "down", "lan":
+			// valid
+		default:
+			return Output{}, fmt.Errorf("%w: unsupported network %q (allowed: up, wan, down, lan)", ErrInvalidActionPayload, payload.Network)
+		}
+
+		var err error
+		interfaceName, err = e.resolveNetwork(ctx, payload.Network)
+		if err != nil {
+			return Output{}, fmt.Errorf("%w: %v", ErrInvalidActionPayload, err)
+		}
+	}
+	if len(interfaceName) == 0 {
+		return Output{}, fmt.Errorf("%w: interface is required and could not be determined", ErrInvalidActionPayload)
+	}
+	if len(interfaceName) > maxInterfaceNameLen {
+		return Output{}, fmt.Errorf("%w: interface name %q exceeds maximum length (%d)", ErrInvalidActionPayload, interfaceName, maxInterfaceNameLen)
 	}
 	if strings.Contains(interfaceName, "..") || strings.Contains(interfaceName, "/") || strings.Contains(interfaceName, "\\") {
 		return Output{}, fmt.Errorf("%w: invalid interface name %q", ErrInvalidActionPayload, interfaceName)
 	}
 
-	var interfaceValid bool
-	if _, err := os.Stat("/sys/class/net/" + interfaceName); err == nil {
-		interfaceValid = true
-	} else {
-		if vyosInterfaceRegex.MatchString(interfaceName) {
-			interfaceValid = true
-		}
-	}
-	if !interfaceValid {
+	if !safeInterfaceRegex.MatchString(interfaceName) {
 		return Output{}, fmt.Errorf("%w: invalid interface name %q", ErrInvalidActionPayload, interfaceName)
 	}
+
+	inspector := e.inspector
+	if inspector == nil {
+		inspector = &systemNetworkInspector{}
+	}
+	if !inspector.InterfaceExists(interfaceName) {
+		return Output{}, fmt.Errorf("%w: interface %q does not exist", ErrInvalidActionPayload, interfaceName)
+	}
+	payload.Interface = interfaceName
 
 	// Validate URI
 	if len(payload.URI) == 0 {

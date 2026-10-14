@@ -57,6 +57,12 @@ func (r *fakeCommandRunner) Command(ctx context.Context, name string, args ...st
 	}
 }
 
+func newTestVyOSTraceExecutor(runner CommandRunner, client *http.Client) *VyOSTraceExecutor {
+	exec := NewVyOSTraceExecutor(runner, client)
+	exec.inspector = &fakeNetworkInspector{}
+	return exec
+}
+
 /*
 TC-ACTIONS-TRACE-001
 Type: Positive
@@ -105,7 +111,7 @@ func TestVyOSTraceExecutorHappyPath(t *testing.T) {
 
 	runner := &fakeCommandRunner{}
 
-	exec := NewVyOSTraceExecutor(runner, server.Client())
+	exec := newTestVyOSTraceExecutor(runner, server.Client())
 	msg := agentcore.ActionCommand{
 		Version: "1.0",
 		RPCID:   "rpc-trace-1",
@@ -173,7 +179,8 @@ Validates:
 */
 func TestVyOSTraceExecutorPayloadValidation(t *testing.T) {
 	runner := &fakeCommandRunner{}
-	exec := NewVyOSTraceExecutor(runner, nil)
+	exec := newTestVyOSTraceExecutor(runner, nil)
+	exec.routeResolver = func(_ string) string { return "" }
 
 	cases := []struct {
 		name    string
@@ -266,7 +273,7 @@ func TestVyOSTraceExecutorContextCancellation(t *testing.T) {
 	// Define a runner that blocks until the context is cancelled
 	runner := &fakeCommandRunner{}
 
-	exec := NewVyOSTraceExecutor(runner, nil)
+	exec := newTestVyOSTraceExecutor(runner, nil)
 	msg := agentcore.ActionCommand{
 		Version: "1.0",
 		RPCID:   "rpc-trace-cancel",
@@ -315,7 +322,7 @@ func TestVyOSTraceExecutorHTTPFailure(t *testing.T) {
 
 	runner := &fakeCommandRunner{}
 
-	exec := NewVyOSTraceExecutor(runner, server.Client())
+	exec := newTestVyOSTraceExecutor(runner, server.Client())
 	msg := agentcore.ActionCommand{
 		Version: "1.0",
 		RPCID:   "rpc-trace-http-fail",
@@ -362,7 +369,7 @@ func TestVyOSTraceExecutorRPCTraversalSafe(t *testing.T) {
 	defer server.Close()
 
 	runner := &fakeCommandRunner{}
-	exec := NewVyOSTraceExecutor(runner, server.Client())
+	exec := newTestVyOSTraceExecutor(runner, server.Client())
 
 	msg := agentcore.ActionCommand{
 		Version: "1.0",
@@ -404,7 +411,7 @@ Validates:
 */
 func TestVyOSTraceExecutorParameterBounds(t *testing.T) {
 	runner := &fakeCommandRunner{}
-	exec := NewVyOSTraceExecutor(runner, nil)
+	exec := newTestVyOSTraceExecutor(runner, nil)
 
 	cases := []struct {
 		name    string
@@ -458,7 +465,7 @@ Validates:
 */
 func TestVyOSTraceExecutorInterfaceValidation(t *testing.T) {
 	runner := &fakeCommandRunner{}
-	exec := NewVyOSTraceExecutor(runner, nil)
+	exec := newTestVyOSTraceExecutor(runner, nil)
 
 	cases := []struct {
 		name        string
@@ -469,15 +476,43 @@ func TestVyOSTraceExecutorInterfaceValidation(t *testing.T) {
 		{"valid bond", "bond99", false},
 		{"valid dum", "dum1", false},
 		{"valid subinterface", "eth0.100", false},
+		{"valid pppoe", "pppoe0", false},
+		{"valid wireguard", "wg0", false},
+		{"valid bridge with hyphen", "br-lan", false},
+		{"valid tunnel", "tun0", false},
 		{"invalid slash", "eth/0", true},
 		{"invalid backslash", "eth\\0", true},
 		{"invalid dots", "eth0..1", true},
 		{"invalid command injection", "eth0;ls", true},
-		{"invalid random name", "invalidname", true},
+		{"invalid shell char pipe", "eth0|ls", true},
+		{"invalid space", "eth0 test", true},
+		{"invalid exceeds max len", "verylonginterfacename123", true},
 	}
+
+	t.Run("rejects non-existent interface", func(t *testing.T) {
+		nonExistentExec := NewVyOSTraceExecutor(runner, nil)
+		nonExistentExec.inspector = &fakeNetworkInspector{
+			interfaceExistsFn: func(name string) bool { return false },
+		}
+		msg := agentcore.ActionCommand{
+			Version: "1.0",
+			RPCID:   "rpc-1",
+			Target:  "vyos",
+			Action:  ActionTrace,
+			Payload: json.RawMessage(`{"interface":"eth99","uri":"http://localhost"}`),
+		}
+		_, err := nonExistentExec.Execute(context.Background(), msg)
+		if err == nil {
+			t.Fatal("expected error for non-existent interface, got nil")
+		}
+		if !strings.Contains(err.Error(), "does not exist") {
+			t.Fatalf("expected 'does not exist' error, got %v", err)
+		}
+	})
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			runner.lastArgs = nil
 			payloadMap := map[string]any{
 				"interface": tc.iface,
 				"uri":       "http://localhost",
@@ -495,12 +530,23 @@ func TestVyOSTraceExecutorInterfaceValidation(t *testing.T) {
 			}
 			_, err = exec.Execute(context.Background(), msg)
 			if tc.expectError {
-				if err == nil || !strings.Contains(err.Error(), "invalid interface name") {
+				if err == nil || (!strings.Contains(err.Error(), "invalid interface name") && !strings.Contains(err.Error(), "exceeds maximum length")) {
 					t.Fatalf("expected invalid interface error, got: %v", err)
 				}
 			} else {
-				if err != nil && strings.Contains(err.Error(), "invalid interface name") {
+				if err != nil && (strings.Contains(err.Error(), "invalid interface name") || strings.Contains(err.Error(), "exceeds maximum length")) {
 					t.Fatalf("unexpected interface validation failure: %v", err)
+				}
+				// Verify execution reached the command runner with the expected interface argument (-i <interface>)
+				foundInterfaceArg := false
+				for i := 0; i < len(runner.lastArgs)-1; i++ {
+					if runner.lastArgs[i] == "-i" && runner.lastArgs[i+1] == tc.iface {
+						foundInterfaceArg = true
+						break
+					}
+				}
+				if !foundInterfaceArg {
+					t.Fatalf("expected command runner to be invoked with '-i %s', got args: %v (error: %v)", tc.iface, runner.lastArgs, err)
 				}
 			}
 		})
@@ -546,7 +592,7 @@ func TestVyOSTraceExecutorLargeUploadStreaming(t *testing.T) {
 	_, _ = tempFile.Write(data)
 	tempFile.Close()
 
-	exec := NewVyOSTraceExecutor(&fakeCommandRunner{}, server.Client())
+	exec := newTestVyOSTraceExecutor(&fakeCommandRunner{}, server.Client())
 	err = exec.uploadFile(context.Background(), server.URL, pcapPath)
 	if err != nil {
 		t.Fatalf("upload failed: %v", err)
@@ -577,7 +623,7 @@ func TestVyOSTraceExecutorUploadTimeout(t *testing.T) {
 	defer server.Close()
 
 	runner := &fakeCommandRunner{}
-	exec := NewVyOSTraceExecutor(runner, server.Client())
+	exec := newTestVyOSTraceExecutor(runner, server.Client())
 	exec.uploadTimeout = 50 * time.Millisecond
 
 	msg := agentcore.ActionCommand{
@@ -625,7 +671,7 @@ func TestVyOSTraceExecutorExecutionFailure(t *testing.T) {
 	runner := &fakeCommandRunner{
 		runErr: errors.New("exit status 1"),
 	}
-	exec := NewVyOSTraceExecutor(runner, nil)
+	exec := newTestVyOSTraceExecutor(runner, nil)
 
 	msg := agentcore.ActionCommand{
 		Version: "1.0",
@@ -657,4 +703,302 @@ func TestVyOSTraceExecutorExecutionFailure(t *testing.T) {
 			t.Fatalf("expected pcap file to be cleaned up on execution failure, stat returned: %v", err)
 		}
 	}
+}
+
+type fakeNetworkInspector struct {
+	netInterfacesFn   func() ([]InterfaceInfo, error)
+	interfaceExistsFn func(name string) bool
+}
+
+func (f *fakeNetworkInspector) InterfaceExists(name string) bool {
+	if f.interfaceExistsFn != nil {
+		return f.interfaceExistsFn(name)
+	}
+	// Default to true in tests unless explicitly overridden
+	return true
+}
+
+func (f *fakeNetworkInspector) NetInterfaces() ([]InterfaceInfo, error) {
+	if f.netInterfacesFn != nil {
+		return f.netInterfacesFn()
+	}
+	return nil, nil
+}
+
+func TestResolveDefaultWANInterface(t *testing.T) {
+	t.Run("resolves interface with unambiguous wan alias", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0", Alias: "WAN"},
+					{Name: "eth1"},
+				}, nil
+			},
+		}
+
+		wan := resolveDefaultWANInterface(inspector)
+		if wan != "eth0" {
+			t.Fatalf("expected eth0, got %q", wan)
+		}
+	})
+
+	t.Run("resolves master bridge when both bridge and slave port have wan alias", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0", Alias: "WAN", IsSlave: true},
+					{Name: "br0", Alias: "WAN"},
+				}, nil
+			},
+		}
+
+		wan := resolveDefaultWANInterface(inspector)
+		if wan != "br0" {
+			t.Fatalf("expected br0, got %q", wan)
+		}
+	})
+
+	t.Run("returns empty when multiple interfaces have wan alias", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0", Alias: "WAN"},
+					{Name: "eth1", Alias: "WAN"},
+				}, nil
+			},
+		}
+
+		wan := resolveDefaultWANInterface(inspector)
+		if wan != "" {
+			t.Fatalf("expected empty string for ambiguous WAN aliases, got %q", wan)
+		}
+	})
+
+	t.Run("resolves unambiguous wan alias regardless of link state (even if down or unknown)", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0", Alias: "WAN"},
+					{Name: "eth1"},
+				}, nil
+			},
+		}
+
+		wan := resolveDefaultWANInterface(inspector)
+		if wan != "eth0" {
+			t.Fatalf("expected eth0, got %q", wan)
+		}
+	})
+
+	t.Run("ignores loopback interface even if it has wan alias", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "lo", Alias: "WAN"},
+				}, nil
+			},
+		}
+
+		wan := resolveDefaultWANInterface(inspector)
+		if wan != "" {
+			t.Fatalf("expected empty string for loopback interface, got %q", wan)
+		}
+	})
+}
+
+func TestResolveDefaultLANInterface(t *testing.T) {
+	t.Run("resolves interface with unambiguous LAN alias", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0"},
+					{Name: "eth2", Alias: "LAN"},
+				}, nil
+			},
+		}
+
+		lan := resolveDefaultLANInterface(inspector)
+		if lan != "eth2" {
+			t.Fatalf("expected eth2, got %q", lan)
+		}
+	})
+
+	t.Run("returns empty when multiple interfaces have LAN alias", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0"},
+					{Name: "eth1", Alias: "LAN"},
+					{Name: "eth2", Alias: "LAN"},
+				}, nil
+			},
+		}
+
+		lan := resolveDefaultLANInterface(inspector)
+		if lan != "" {
+			t.Fatalf("expected empty string for ambiguous LAN aliases, got %q", lan)
+		}
+	})
+
+	t.Run("does not resolve bridge without explicit LAN alias", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0"},
+					{Name: "br-lan"},
+				}, nil
+			},
+		}
+
+		lan := resolveDefaultLANInterface(inspector)
+		if lan != "" {
+			t.Fatalf("expected empty string for bridge without LAN alias, got %q", lan)
+		}
+	})
+
+	t.Run("resolves interface with unambiguous LAN alias even if down", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth0"},
+					{Name: "br1", Alias: "LAN"},
+				}, nil
+			},
+		}
+
+		lan := resolveDefaultLANInterface(inspector)
+		if lan != "br1" {
+			t.Fatalf("expected br1 for LAN interface even when down, got %q", lan)
+		}
+	})
+
+	t.Run("resolves master bridge when both bridge and slave port have LAN alias", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "eth1", Alias: "LAN", IsSlave: true},
+					{Name: "br1", Alias: "LAN"},
+				}, nil
+			},
+		}
+
+		lan := resolveDefaultLANInterface(inspector)
+		if lan != "br1" {
+			t.Fatalf("expected br1, got %q", lan)
+		}
+	})
+
+	t.Run("ignores loopback interface even if it has LAN alias", func(t *testing.T) {
+		inspector := &fakeNetworkInspector{
+			netInterfacesFn: func() ([]InterfaceInfo, error) {
+				return []InterfaceInfo{
+					{Name: "lo", Alias: "LAN"},
+				}, nil
+			},
+		}
+
+		lan := resolveDefaultLANInterface(inspector)
+		if lan != "" {
+			t.Fatalf("expected empty string for loopback interface, got %q", lan)
+		}
+	})
+}
+
+func TestVyOSTraceExecutorNetworkValidation(t *testing.T) {
+	runner := &fakeCommandRunner{}
+	exec := newTestVyOSTraceExecutor(runner, nil)
+
+	invalidNetworks := []string{"internal", "management", "dowm", "dmz"}
+	for _, netName := range invalidNetworks {
+		t.Run("rejects unsupported network: "+netName, func(t *testing.T) {
+			msg := agentcore.ActionCommand{
+				Version: "1.0", RPCID: "rpc-invalid-net", Target: "vyos", Action: ActionTrace,
+				Payload: json.RawMessage(`{"network":"` + netName + `","uri":"http://localhost"}`),
+			}
+			_, err := exec.Execute(context.Background(), msg)
+			if !errors.Is(err, ErrInvalidActionPayload) {
+				t.Fatalf("expected ErrInvalidActionPayload, got %v", err)
+			}
+			if !strings.Contains(err.Error(), "unsupported network") {
+				t.Fatalf("expected 'unsupported network' error, got %v", err)
+			}
+		})
+	}
+
+	t.Run("allows unrecognized network if interface is explicitly provided", func(t *testing.T) {
+		msg := agentcore.ActionCommand{
+			Version: "1.0", RPCID: "rpc-explicit-net", Target: "vyos", Action: ActionTrace,
+			Payload: json.RawMessage(`{"interface":"eth0","network":"management","uri":"http://localhost"}`),
+		}
+		_, err := exec.Execute(context.Background(), msg)
+		if err == nil || strings.Contains(err.Error(), "unsupported network") {
+			t.Fatalf("expected upload failure without unsupported network error, got: %v", err)
+		}
+		if runner.lastArgs[2] != "eth0" {
+			t.Fatalf("expected interface eth0, got %s", runner.lastArgs[2])
+		}
+	})
+}
+
+func TestVyOSTraceExecutorNetworkResolution(t *testing.T) {
+	runner := &fakeCommandRunner{}
+	exec := newTestVyOSTraceExecutor(runner, nil)
+
+	var hasLAN bool
+	inspector := &fakeNetworkInspector{
+		netInterfacesFn: func() ([]InterfaceInfo, error) {
+			itfs := []InterfaceInfo{
+				{Name: "eth0", Alias: "WAN"},
+			}
+			if hasLAN {
+				itfs = append(itfs, InterfaceInfo{Name: "eth1", Alias: "LAN"})
+			}
+			return itfs, nil
+		},
+	}
+	exec.inspector = inspector
+
+	t.Run("resolves wan when network up", func(t *testing.T) {
+		msg := agentcore.ActionCommand{
+			Version: "1.0", RPCID: "rpc-up", Target: "vyos", Action: ActionTrace,
+			Payload: json.RawMessage(`{"network":"up","uri":"http://localhost"}`),
+		}
+		_, err := exec.Execute(context.Background(), msg)
+		if err == nil || strings.Contains(err.Error(), "interface is required") {
+			t.Fatalf("expected upload failure after resolving interface, got %v", err)
+		}
+		if runner.lastArgs[2] != "eth0" {
+			t.Fatalf("expected tcpdump interface eth0, got %s", runner.lastArgs[2])
+		}
+	})
+
+	t.Run("resolves lan when network down and lan exists", func(t *testing.T) {
+		hasLAN = true
+		msg := agentcore.ActionCommand{
+			Version: "1.0", RPCID: "rpc-down", Target: "vyos", Action: ActionTrace,
+			Payload: json.RawMessage(`{"network":"down","uri":"http://localhost"}`),
+		}
+		_, err := exec.Execute(context.Background(), msg)
+		if err == nil || strings.Contains(err.Error(), "interface is required") {
+			t.Fatalf("expected upload failure after resolving interface, got %v", err)
+		}
+		if runner.lastArgs[2] != "eth1" {
+			t.Fatalf("expected tcpdump interface eth1, got %s", runner.lastArgs[2])
+		}
+	})
+
+	t.Run("fails when network down and lan cannot be determined", func(t *testing.T) {
+		hasLAN = false
+		msg := agentcore.ActionCommand{
+			Version: "1.0", RPCID: "rpc-down-fail", Target: "vyos", Action: ActionTrace,
+			Payload: json.RawMessage(`{"network":"down","uri":"http://localhost"}`),
+		}
+		_, err := exec.Execute(context.Background(), msg)
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "interface is required and could not be determined") {
+			t.Fatalf("unexpected error message: %v", err)
+		}
+	})
 }
