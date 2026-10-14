@@ -64,12 +64,9 @@ type NetworkInspector interface {
 }
 
 type InterfaceInfo struct {
-	Name      string
-	Alias     string
-	IsBridge  bool
-	IsSlave   bool
-	OperState string
-	Flags     uint32
+	Name    string
+	Alias   string
+	IsSlave bool
 }
 
 type systemNetworkInspector struct{}
@@ -96,31 +93,14 @@ func (s *systemNetworkInspector) NetInterfaces() ([]InterfaceInfo, error) {
 		if err == nil {
 			alias = strings.TrimSpace(string(aliasBytes))
 		}
-		var operState string
-		stateBytes, err := os.ReadFile(filepath.Join("/sys/class/net", name, "operstate"))
-		if err == nil {
-			operState = strings.TrimSpace(string(stateBytes))
-		}
-		_, errBridge := os.Stat(filepath.Join("/sys/class/net", name, "bridge"))
-		isBridge := (errBridge == nil)
 
 		_, errMaster := os.Stat(filepath.Join("/sys/class/net", name, "master"))
 		isSlave := (errMaster == nil)
 
-		var flags uint32
-		flagsBytes, err := os.ReadFile(filepath.Join("/sys/class/net", name, "flags"))
-		if err == nil {
-			f, _ := strconv.ParseUint(strings.TrimSpace(string(flagsBytes)), 0, 32)
-			flags = uint32(f)
-		}
-
 		res = append(res, InterfaceInfo{
-			Name:      name,
-			Alias:     alias,
-			IsBridge:  isBridge,
-			IsSlave:   isSlave,
-			OperState: operState,
-			Flags:     flags,
+			Name:    name,
+			Alias:   alias,
+			IsSlave: isSlave,
 		})
 	}
 	return res, nil
@@ -187,23 +167,13 @@ func resolveInterfaceByAlias(inspector NetworkInspector, targetAlias string) str
 }
 
 // resolveDefaultWANInterface resolves the WAN interface strictly via alias "WAN".
-func resolveDefaultWANInterface(ctx context.Context, inspector NetworkInspector) string {
+func resolveDefaultWANInterface(inspector NetworkInspector) string {
 	return resolveInterfaceByAlias(inspector, "wan")
 }
 
 // resolveDefaultLANInterface resolves the LAN interface strictly via alias "LAN".
 func resolveDefaultLANInterface(inspector NetworkInspector) string {
 	return resolveInterfaceByAlias(inspector, "lan")
-}
-
-// resolveNetworkInterface resolves the interface name based on network direction ("up" for WAN, "down" for LAN).
-func resolveNetworkInterface(network string) string {
-	inspector := &systemNetworkInspector{}
-	netLower := strings.ToLower(strings.TrimSpace(network))
-	if netLower == "down" || netLower == "lan" {
-		return resolveDefaultLANInterface(inspector)
-	}
-	return resolveDefaultWANInterface(context.Background(), inspector)
 }
 
 func (e *VyOSTraceExecutor) resolveNetwork(ctx context.Context, network string) (string, error) {
@@ -232,7 +202,7 @@ func (e *VyOSTraceExecutor) resolveNetwork(ctx context.Context, network string) 
 		return lan, nil
 	}
 
-	wan := resolveDefaultWANInterface(ctx, inspector)
+	wan := resolveDefaultWANInterface(inspector)
 	if wan == "" {
 		if network != "" {
 			return "", fmt.Errorf("interface is required and could not be determined for network: %s", network)

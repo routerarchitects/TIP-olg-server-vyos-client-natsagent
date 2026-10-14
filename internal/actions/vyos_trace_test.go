@@ -512,6 +512,7 @@ func TestVyOSTraceExecutorInterfaceValidation(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			runner.lastArgs = nil
 			payloadMap := map[string]any{
 				"interface": tc.iface,
 				"uri":       "http://localhost",
@@ -535,6 +536,17 @@ func TestVyOSTraceExecutorInterfaceValidation(t *testing.T) {
 			} else {
 				if err != nil && (strings.Contains(err.Error(), "invalid interface name") || strings.Contains(err.Error(), "exceeds maximum length")) {
 					t.Fatalf("unexpected interface validation failure: %v", err)
+				}
+				// Verify execution reached the command runner with the expected interface argument (-i <interface>)
+				foundInterfaceArg := false
+				for i := 0; i < len(runner.lastArgs)-1; i++ {
+					if runner.lastArgs[i] == "-i" && runner.lastArgs[i+1] == tc.iface {
+						foundInterfaceArg = true
+						break
+					}
+				}
+				if !foundInterfaceArg {
+					t.Fatalf("expected command runner to be invoked with '-i %s', got args: %v (error: %v)", tc.iface, runner.lastArgs, err)
 				}
 			}
 		})
@@ -718,13 +730,13 @@ func TestResolveDefaultWANInterface(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
-					{Name: "eth0", Alias: "WAN", OperState: "up"},
-					{Name: "eth1", OperState: "up"},
+					{Name: "eth0", Alias: "WAN"},
+					{Name: "eth1"},
 				}, nil
 			},
 		}
 
-		wan := resolveDefaultWANInterface(context.Background(), inspector)
+		wan := resolveDefaultWANInterface(inspector)
 		if wan != "eth0" {
 			t.Fatalf("expected eth0, got %q", wan)
 		}
@@ -734,13 +746,13 @@ func TestResolveDefaultWANInterface(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
-					{Name: "eth0", Alias: "WAN", IsSlave: true, OperState: "up"},
-					{Name: "br0", Alias: "WAN", IsBridge: true, OperState: "up"},
+					{Name: "eth0", Alias: "WAN", IsSlave: true},
+					{Name: "br0", Alias: "WAN"},
 				}, nil
 			},
 		}
 
-		wan := resolveDefaultWANInterface(context.Background(), inspector)
+		wan := resolveDefaultWANInterface(inspector)
 		if wan != "br0" {
 			t.Fatalf("expected br0, got %q", wan)
 		}
@@ -750,13 +762,13 @@ func TestResolveDefaultWANInterface(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
-					{Name: "eth0", Alias: "WAN", OperState: "up"},
-					{Name: "eth1", Alias: "WAN", OperState: "up"},
+					{Name: "eth0", Alias: "WAN"},
+					{Name: "eth1", Alias: "WAN"},
 				}, nil
 			},
 		}
 
-		wan := resolveDefaultWANInterface(context.Background(), inspector)
+		wan := resolveDefaultWANInterface(inspector)
 		if wan != "" {
 			t.Fatalf("expected empty string for ambiguous WAN aliases, got %q", wan)
 		}
@@ -766,13 +778,13 @@ func TestResolveDefaultWANInterface(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
-					{Name: "eth0", Alias: "WAN", OperState: "down"},
-					{Name: "eth1", OperState: "up"},
+					{Name: "eth0", Alias: "WAN"},
+					{Name: "eth1"},
 				}, nil
 			},
 		}
 
-		wan := resolveDefaultWANInterface(context.Background(), inspector)
+		wan := resolveDefaultWANInterface(inspector)
 		if wan != "eth0" {
 			t.Fatalf("expected eth0, got %q", wan)
 		}
@@ -782,12 +794,12 @@ func TestResolveDefaultWANInterface(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
-					{Name: "lo", Alias: "WAN", OperState: "up"},
+					{Name: "lo", Alias: "WAN"},
 				}, nil
 			},
 		}
 
-		wan := resolveDefaultWANInterface(context.Background(), inspector)
+		wan := resolveDefaultWANInterface(inspector)
 		if wan != "" {
 			t.Fatalf("expected empty string for loopback interface, got %q", wan)
 		}
@@ -799,8 +811,8 @@ func TestResolveDefaultLANInterface(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
-					{Name: "eth0", OperState: "up"},
-					{Name: "eth2", Alias: "LAN", OperState: "up"},
+					{Name: "eth0"},
+					{Name: "eth2", Alias: "LAN"},
 				}, nil
 			},
 		}
@@ -815,9 +827,9 @@ func TestResolveDefaultLANInterface(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
-					{Name: "eth0", OperState: "up"},
-					{Name: "eth1", Alias: "LAN", OperState: "up"},
-					{Name: "eth2", Alias: "LAN", OperState: "up"},
+					{Name: "eth0"},
+					{Name: "eth1", Alias: "LAN"},
+					{Name: "eth2", Alias: "LAN"},
 				}, nil
 			},
 		}
@@ -832,8 +844,8 @@ func TestResolveDefaultLANInterface(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
-					{Name: "eth0", OperState: "up"},
-					{Name: "br-lan", IsBridge: true, OperState: "up"},
+					{Name: "eth0"},
+					{Name: "br-lan"},
 				}, nil
 			},
 		}
@@ -848,8 +860,8 @@ func TestResolveDefaultLANInterface(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
-					{Name: "eth0", Flags: 0x1, OperState: "up"},
-					{Name: "br1", Alias: "LAN", Flags: 0x0, OperState: "down"},
+					{Name: "eth0"},
+					{Name: "br1", Alias: "LAN"},
 				}, nil
 			},
 		}
@@ -864,8 +876,8 @@ func TestResolveDefaultLANInterface(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
-					{Name: "eth1", Alias: "LAN", IsSlave: true, OperState: "up"},
-					{Name: "br1", Alias: "LAN", IsBridge: true, OperState: "up"},
+					{Name: "eth1", Alias: "LAN", IsSlave: true},
+					{Name: "br1", Alias: "LAN"},
 				}, nil
 			},
 		}
@@ -880,7 +892,7 @@ func TestResolveDefaultLANInterface(t *testing.T) {
 		inspector := &fakeNetworkInspector{
 			netInterfacesFn: func() ([]InterfaceInfo, error) {
 				return []InterfaceInfo{
-					{Name: "lo", Alias: "LAN", OperState: "up"},
+					{Name: "lo", Alias: "LAN"},
 				}, nil
 			},
 		}
@@ -936,10 +948,10 @@ func TestVyOSTraceExecutorNetworkResolution(t *testing.T) {
 	inspector := &fakeNetworkInspector{
 		netInterfacesFn: func() ([]InterfaceInfo, error) {
 			itfs := []InterfaceInfo{
-				{Name: "eth0", Alias: "WAN", OperState: "up"},
+				{Name: "eth0", Alias: "WAN"},
 			}
 			if hasLAN {
-				itfs = append(itfs, InterfaceInfo{Name: "eth1", Alias: "LAN", OperState: "up"})
+				itfs = append(itfs, InterfaceInfo{Name: "eth1", Alias: "LAN"})
 			}
 			return itfs, nil
 		},
