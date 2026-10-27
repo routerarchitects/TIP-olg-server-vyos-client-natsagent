@@ -30,7 +30,7 @@ func DefaultAppConfig() AppConfig {
 			},
 			Actions: ActionsConfig{
 				Mode:    "placeholder",
-				Enabled: []string{"trace"},
+				Enabled: []string{"trace", "rtty"},
 			},
 		},
 		AgentCore: AgentCoreConfig{

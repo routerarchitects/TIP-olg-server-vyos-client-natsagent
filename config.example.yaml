@@ -24,6 +24,7 @@ agent:
     mode: placeholder # placeholder | real
     enabled:
       - trace
+      - rtty
 
 agentcore:
   nats:

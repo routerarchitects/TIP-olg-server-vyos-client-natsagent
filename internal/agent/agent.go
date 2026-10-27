@@ -150,6 +150,12 @@ func New(appCfg *config.AppConfig, coreCfg agentcore.Config, opts ...Option) (*R
 	} else {
 		traceExecutor = actions.NewPlaceholderTraceExecutor()
 	}
+	var rttyExecutor actions.Executor
+	if appCfg.Agent.Actions.Mode == "real" {
+		rttyExecutor = actions.NewVyOSRTTYExecutor(actions.NewRealRTTYProcessRunner())
+	} else {
+		rttyExecutor = actions.NewPlaceholderRTTYExecutor()
+	}
 	actionService, err := actions.NewService(actions.Dependencies{
 		Client:  client,
 		Logger:  options.logger,
@@ -157,6 +163,7 @@ func New(appCfg *config.AppConfig, coreCfg agentcore.Config, opts ...Option) (*R
 		Enabled: appCfg.Agent.Actions.Enabled,
 		Executors: map[string]actions.Executor{
 			actions.ActionTrace: traceExecutor,
+			actions.ActionRTTY:  rttyExecutor,
 		},
 	})
 	if err != nil {
