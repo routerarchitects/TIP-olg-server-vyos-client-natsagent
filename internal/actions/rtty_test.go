@@ -36,7 +36,7 @@ func (f *fakeRTTYProcessRunner) KillExisting(ctx context.Context) error {
 	return f.killErr
 }
 
-func (f *fakeRTTYProcessRunner) Start(ctx context.Context, bin string, args []string) error {
+func (f *fakeRTTYProcessRunner) Start(bin string, args []string) error {
 	f.startCalled = true
 	f.startBin = bin
 	f.startArgs = args
@@ -224,7 +224,7 @@ func TestVyOSRTTYExecutor_Success(t *testing.T) {
 	runner := &fakeRTTYProcessRunner{
 		binPath: "/usr/sbin/rtty",
 	}
-	exec := NewVyOSRTTYExecutor(runner)
+	exec := NewVyOSRTTYExecutor(runner).WithCertAndKey("/tmp/cert.pem", "/tmp/key.pem")
 
 	ctx := context.Background()
 	msg := agentcore.ActionCommand{
@@ -259,6 +259,8 @@ func TestVyOSRTTYExecutor_Success(t *testing.T) {
 		"-v",
 		"-d", "VyOS",
 		"-e", "60",
+		"-c", "/tmp/cert.pem",
+		"-k", "/tmp/key.pem",
 	}
 	if !reflect.DeepEqual(runner.startArgs, expectedArgs) {
 		t.Errorf("startArgs = %v, want %v", runner.startArgs, expectedArgs)
@@ -274,17 +276,6 @@ func TestVyOSRTTYExecutor_Success(t *testing.T) {
 	}
 	if res["text"] != "Success" || res["error"] != float64(0) || res["id"] != "conn123" {
 		t.Fatalf("unexpected result payload: %+v", res)
-	}
-
-	// Subtest with cert & key
-	runner2 := &fakeRTTYProcessRunner{binPath: "/usr/sbin/rtty"}
-	exec2 := NewVyOSRTTYExecutor(runner2).WithCertAndKey("/tmp/cert.pem", "/tmp/key.pem")
-	if _, err := exec2.Execute(ctx, msg); err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	expectedArgsWithCerts := append(expectedArgs, "-c", "/tmp/cert.pem", "-k", "/tmp/key.pem")
-	if !reflect.DeepEqual(runner2.startArgs, expectedArgsWithCerts) {
-		t.Errorf("startArgs with certs = %v, want %v", runner2.startArgs, expectedArgsWithCerts)
 	}
 }
 
@@ -374,11 +365,25 @@ func TestVyOSRTTYExecutor_Errors(t *testing.T) {
 		}
 	})
 
+	t.Run("missing mtls certs error", func(t *testing.T) {
+		runner := &fakeRTTYProcessRunner{binPath: "/usr/sbin/rtty"}
+		exec := NewVyOSRTTYExecutor(runner)
+		_, err := exec.Execute(ctx, agentcore.ActionCommand{
+			Target:  "vyos",
+			Action:  ActionRTTY,
+			RPCID:   "1",
+			Payload: validRTTYPayloadBytes(),
+		})
+		if !errors.Is(err, ErrMTLSCertNotFound) {
+			t.Fatalf("expected ErrMTLSCertNotFound, got: %v", err)
+		}
+	})
+
 	t.Run("start error", func(t *testing.T) {
 		runner := &fakeRTTYProcessRunner{
 			startErr: errors.New("start failed"),
 		}
-		exec := NewVyOSRTTYExecutor(runner)
+		exec := NewVyOSRTTYExecutor(runner).WithCertAndKey("/tmp/cert.pem", "/tmp/key.pem")
 		_, err := exec.Execute(ctx, agentcore.ActionCommand{
 			Target:  "vyos",
 			Action:  ActionRTTY,

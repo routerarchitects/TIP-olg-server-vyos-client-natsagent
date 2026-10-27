@@ -14,11 +14,13 @@ import (
 	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
 )
 
+var ErrMTLSCertNotFound = errors.New("mTLS certificate or key not found: required for secure-rtty (checked /etc/olg/secrets, /etc/rtty, /etc/olg/client)")
+
 // RTTYProcessRunner abstracts process execution for rtty to enable unit testing.
 type RTTYProcessRunner interface {
 	FindBinary() (string, error)
 	KillExisting(ctx context.Context) error
-	Start(ctx context.Context, bin string, args []string) error
+	Start(bin string, args []string) error
 }
 
 type RealRTTYProcessRunner struct{}
@@ -51,7 +53,10 @@ func (r *RealRTTYProcessRunner) KillExisting(ctx context.Context) error {
 	return nil
 }
 
-func (r *RealRTTYProcessRunner) Start(ctx context.Context, bin string, args []string) error {
+// Start launches rtty detached from the short-lived action RPC context so the
+// terminal session outlives the NATS command invocation. Its lifecycle is governed
+// by OWGW socket disconnection, user logout, or preemption by KillExisting.
+func (r *RealRTTYProcessRunner) Start(bin string, args []string) error {
 	cmd := exec.Command(bin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
@@ -173,11 +178,13 @@ func (e *VyOSRTTYExecutor) Execute(ctx context.Context, msg agentcore.ActionComm
 	if payload.Timeout > 0 {
 		args = append(args, "-e", strconv.Itoa(payload.Timeout))
 	}
-	if cert, key := e.findCertAndKey(); cert != "" && key != "" {
-		args = append(args, "-c", cert, "-k", key)
+	cert, key := e.findCertAndKey()
+	if cert == "" || key == "" {
+		return Output{}, ErrMTLSCertNotFound
 	}
+	args = append(args, "-c", cert, "-k", key)
 
-	if err := e.runner.Start(ctx, bin, args); err != nil {
+	if err := e.runner.Start(bin, args); err != nil {
 		return Output{}, fmt.Errorf("launch rtty: %w", err)
 	}
 
