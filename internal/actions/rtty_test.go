@@ -11,14 +11,14 @@ import (
 )
 
 type fakeRTTYProcessRunner struct {
-	binPath       string
-	findErr       error
-	killErr       error
-	startErr      error
-	killCalled    bool
-	startCalled   bool
-	startBin      string
-	startArgs     []string
+	binPath     string
+	findErr     error
+	killErr     error
+	startErr    error
+	killCalled  bool
+	startCalled bool
+	startBin    string
+	startArgs   []string
 }
 
 func (f *fakeRTTYProcessRunner) FindBinary() (string, error) {
@@ -63,68 +63,68 @@ func TestRTTYPayload_Validate(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "valid payload",
-			mutate: func(p *RTTYPayload) {},
+			name:    "valid payload",
+			mutate:  func(p *RTTYPayload) {},
 			wantErr: false,
 		},
 		{
-			name: "empty id",
-			mutate: func(p *RTTYPayload) { p.ID = "" },
+			name:    "empty id",
+			mutate:  func(p *RTTYPayload) { p.ID = "" },
 			wantErr: true,
 		},
 		{
-			name: "whitespace id",
-			mutate: func(p *RTTYPayload) { p.ID = "   " },
+			name:    "whitespace id",
+			mutate:  func(p *RTTYPayload) { p.ID = "   " },
 			wantErr: true,
 		},
 		{
-			name: "invalid chars in id",
-			mutate: func(p *RTTYPayload) { p.ID = "id;rm -rf" },
+			name:    "invalid chars in id",
+			mutate:  func(p *RTTYPayload) { p.ID = "id;rm -rf" },
 			wantErr: true,
 		},
 		{
-			name: "empty token",
-			mutate: func(p *RTTYPayload) { p.Token = "" },
+			name:    "empty token",
+			mutate:  func(p *RTTYPayload) { p.Token = "" },
 			wantErr: true,
 		},
 		{
-			name: "invalid chars in token",
-			mutate: func(p *RTTYPayload) { p.Token = "tok$var" },
+			name:    "invalid chars in token",
+			mutate:  func(p *RTTYPayload) { p.Token = "tok$var" },
 			wantErr: true,
 		},
 		{
-			name: "empty server",
-			mutate: func(p *RTTYPayload) { p.Server = "" },
+			name:    "empty server",
+			mutate:  func(p *RTTYPayload) { p.Server = "" },
 			wantErr: true,
 		},
 		{
-			name: "invalid chars in server",
-			mutate: func(p *RTTYPayload) { p.Server = "srv;bad" },
+			name:    "invalid chars in server",
+			mutate:  func(p *RTTYPayload) { p.Server = "srv;bad" },
 			wantErr: true,
 		},
 		{
-			name: "zero port",
-			mutate: func(p *RTTYPayload) { p.Port = 0 },
+			name:    "zero port",
+			mutate:  func(p *RTTYPayload) { p.Port = 0 },
 			wantErr: true,
 		},
 		{
-			name: "negative port",
-			mutate: func(p *RTTYPayload) { p.Port = -1 },
+			name:    "negative port",
+			mutate:  func(p *RTTYPayload) { p.Port = -1 },
 			wantErr: true,
 		},
 		{
-			name: "too high port",
-			mutate: func(p *RTTYPayload) { p.Port = 65536 },
+			name:    "too high port",
+			mutate:  func(p *RTTYPayload) { p.Port = 65536 },
 			wantErr: true,
 		},
 		{
-			name: "negative timeout",
-			mutate: func(p *RTTYPayload) { p.Timeout = -5 },
+			name:    "negative timeout",
+			mutate:  func(p *RTTYPayload) { p.Timeout = -5 },
 			wantErr: true,
 		},
 		{
-			name: "zero timeout defaults to 60",
-			mutate: func(p *RTTYPayload) { p.Timeout = 0 },
+			name:    "zero timeout defaults to 60",
+			mutate:  func(p *RTTYPayload) { p.Timeout = 0 },
 			wantErr: false,
 		},
 	}
