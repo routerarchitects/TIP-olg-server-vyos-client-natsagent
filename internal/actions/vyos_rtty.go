@@ -69,6 +69,12 @@ func (r *RealRTTYProcessRunner) Start(bin string, args []string) error {
 		done <- cmd.Wait()
 	}()
 
+	// The 50ms wait is an OS-level startup sanity check to catch immediate startup failures
+	// (e.g. dynamic linker errors like missing libev, invalid CLI flags, or permission errors)
+	// before acknowledging the RPC. In accordance with the OpenWiFi/uCentral asynchronous
+	// control-plane specification, the RPC acknowledges successful process initiation ("rtty session initiated").
+	// The actual TLS handshake and device registration occur out-of-band between rtty and
+	// OWGW port 5912, which the cloud gateway verifies before opening the browser terminal viewport.
 	select {
 	case err := <-done:
 		return fmt.Errorf("rtty exited immediately: %w", err)
@@ -197,6 +203,9 @@ func (e *VyOSRTTYExecutor) Execute(ctx context.Context, msg agentcore.ActionComm
 		return Output{}, fmt.Errorf("build rtty result payload: %w", err)
 	}
 
+	// Return success acknowledging process initiation. In the uCentral architecture, OWGW's
+	// RTTYS server independently verifies TLS session registration on port 5912 before
+	// allowing browser websocket attachment on port 5913.
 	return Output{
 		Payload: resPayload,
 		Message: "rtty session initiated",
