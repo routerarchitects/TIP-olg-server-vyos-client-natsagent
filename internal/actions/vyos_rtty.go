@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"strconv"
@@ -49,8 +50,14 @@ func (r *RealRTTYProcessRunner) FindBinary() (string, error) {
 
 func (r *RealRTTYProcessRunner) KillExisting(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, "pkill", "-x", "rtty")
-	// pkill returns exit code 1 if no matching processes were found, which is normal.
-	_ = cmd.Run()
+	if err := cmd.Run(); err != nil {
+		var exitErr *exec.ExitError
+		// pkill exit code 1 means no matching processes were found, which is normal.
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return nil
+		}
+		log.Printf("rtty: kill existing process failed: %v", err)
+	}
 	return nil
 }
 
