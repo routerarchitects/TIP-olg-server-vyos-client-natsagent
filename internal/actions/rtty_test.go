@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"strconv"
+	"sync"
 	"testing"
 
 	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
@@ -393,5 +395,28 @@ func TestVyOSRTTYExecutor_Errors(t *testing.T) {
 		if err == nil || err.Error() != "launch rtty: start failed" {
 			t.Fatalf("unexpected error: %v", err)
 		}
+	})
+
+	t.Run("concurrent execute requests serialized without race", func(t *testing.T) {
+		runner := &fakeRTTYProcessRunner{binPath: "/usr/sbin/rtty"}
+		exec := NewVyOSRTTYExecutor(runner).WithCertAndKey("/tmp/cert.pem", "/tmp/key.pem")
+
+		var wg sync.WaitGroup
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				_, err := exec.Execute(ctx, agentcore.ActionCommand{
+					Target:  "vyos",
+					Action:  ActionRTTY,
+					RPCID:   strconv.Itoa(idx),
+					Payload: validRTTYPayloadBytes(),
+				})
+				if err != nil {
+					t.Errorf("concurrent execute failed: %v", err)
+				}
+			}(i)
+		}
+		wg.Wait()
 	})
 }

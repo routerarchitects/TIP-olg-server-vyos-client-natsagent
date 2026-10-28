@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -87,6 +88,7 @@ type VyOSRTTYExecutor struct {
 	runner   RTTYProcessRunner
 	certFile string
 	keyFile  string
+	mu       sync.Mutex
 }
 
 func NewVyOSRTTYExecutor(runner RTTYProcessRunner) *VyOSRTTYExecutor {
@@ -135,6 +137,9 @@ func (e *VyOSRTTYExecutor) findCertAndKey() (string, string) {
 }
 
 func (e *VyOSRTTYExecutor) Execute(ctx context.Context, msg agentcore.ActionCommand) (Output, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	if ctx == nil {
 		return Output{}, errors.New("execute action: context is nil")
 	}
