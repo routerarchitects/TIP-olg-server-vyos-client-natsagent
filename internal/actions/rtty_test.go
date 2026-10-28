@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os/exec"
 	"reflect"
 	"strconv"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
 )
@@ -355,7 +357,7 @@ func TestVyOSRTTYExecutor_Errors(t *testing.T) {
 		runner := &fakeRTTYProcessRunner{
 			killErr: errors.New("kill failed"),
 		}
-		exec := NewVyOSRTTYExecutor(runner)
+		exec := NewVyOSRTTYExecutor(runner).WithCertAndKey("/tmp/cert.pem", "/tmp/key.pem")
 		_, err := exec.Execute(ctx, agentcore.ActionCommand{
 			Target:  "vyos",
 			Action:  ActionRTTY,
@@ -367,7 +369,7 @@ func TestVyOSRTTYExecutor_Errors(t *testing.T) {
 		}
 	})
 
-	t.Run("missing mtls certs error", func(t *testing.T) {
+	t.Run("missing mtls certs error preserves existing session", func(t *testing.T) {
 		runner := &fakeRTTYProcessRunner{binPath: "/usr/sbin/rtty"}
 		exec := NewVyOSRTTYExecutor(runner)
 		_, err := exec.Execute(ctx, agentcore.ActionCommand{
@@ -378,6 +380,9 @@ func TestVyOSRTTYExecutor_Errors(t *testing.T) {
 		})
 		if !errors.Is(err, ErrMTLSCertNotFound) {
 			t.Fatalf("expected ErrMTLSCertNotFound, got: %v", err)
+		}
+		if runner.killCalled {
+			t.Fatal("KillExisting should not be called when cert discovery fails")
 		}
 	})
 
@@ -419,4 +424,122 @@ func TestVyOSRTTYExecutor_Errors(t *testing.T) {
 		}
 		wg.Wait()
 	})
+
+	t.Run("binary not found preserves existing session", func(t *testing.T) {
+		runner := &fakeRTTYProcessRunner{
+			findErr: errors.New("binary not found"),
+		}
+		exec := NewVyOSRTTYExecutor(runner).WithCertAndKey("/tmp/cert.pem", "/tmp/key.pem")
+		_, err := exec.Execute(ctx, agentcore.ActionCommand{
+			Target:  "vyos",
+			Action:  ActionRTTY,
+			RPCID:   "1",
+			Payload: validRTTYPayloadBytes(),
+		})
+		if err == nil || err.Error() != "find rtty binary: binary not found" {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if runner.killCalled {
+			t.Fatal("KillExisting should not be called when binary discovery fails")
+		}
+	})
+}
+
+func TestRealRTTYProcessRunner_Lifecycle(t *testing.T) {
+	runner := &RealRTTYProcessRunner{}
+	ctx := context.Background()
+
+	// 1. KillExisting when no process is running returns nil immediately
+	if err := runner.KillExisting(ctx); err != nil {
+		t.Fatalf("expected nil when no process active, got: %v", err)
+	}
+
+	bin, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("sleep binary not found")
+	}
+
+	// 2. Start a process
+	if err := runner.Start(bin, []string{"5"}); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+
+	runner.mu.Lock()
+	pid := runner.activePID
+	runner.mu.Unlock()
+
+	if pid <= 0 {
+		t.Fatalf("expected activePID > 0, got %d", pid)
+	}
+
+	// 3. KillExisting terminates the process and resets activePID to 0
+	if err := runner.KillExisting(ctx); err != nil {
+		t.Fatalf("kill existing failed: %v", err)
+	}
+
+	runner.mu.Lock()
+	postKillPID := runner.activePID
+	runner.mu.Unlock()
+
+	if postKillPID != 0 {
+		t.Fatalf("expected activePID == 0 after KillExisting, got %d", postKillPID)
+	}
+}
+
+func TestRealRTTYProcessRunner_NaturalExit(t *testing.T) {
+	runner := &RealRTTYProcessRunner{}
+	bin, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("sleep binary not found")
+	}
+
+	// Start a short-lived process that survives >50ms but exits quickly (sleep 0.1)
+	if err := runner.Start(bin, []string{"0.1"}); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+
+	// Wait for process to exit naturally
+	time.Sleep(200 * time.Millisecond)
+
+	runner.mu.Lock()
+	pid := runner.activePID
+	runner.mu.Unlock()
+
+	if pid != 0 {
+		t.Fatalf("expected activePID == 0 after natural exit, got %d", pid)
+	}
+}
+
+func TestRealRTTYProcessRunner_ImmediateCrash(t *testing.T) {
+	runner := &RealRTTYProcessRunner{}
+	bin, err := exec.LookPath("false")
+	if err != nil {
+		t.Skip("false binary not found")
+	}
+
+	// 'false' exits immediately with code 1
+	err = runner.Start(bin, nil)
+	if err == nil {
+		t.Fatal("expected error on immediate exit, got nil")
+	}
+}
+
+func TestRealRTTYProcessRunner_ContextCanceled(t *testing.T) {
+	runner := &RealRTTYProcessRunner{}
+	bin, err := exec.LookPath("sleep")
+	if err != nil {
+		t.Skip("sleep binary not found")
+	}
+
+	if err := runner.Start(bin, []string{"5"}); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // pre-cancel context
+
+	err = runner.KillExisting(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got: %v", err)
+	}
 }

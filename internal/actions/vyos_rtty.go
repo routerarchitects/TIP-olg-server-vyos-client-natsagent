@@ -234,8 +234,9 @@ func (e *VyOSRTTYExecutor) Execute(ctx context.Context, msg agentcore.ActionComm
 		return Output{}, fmt.Errorf("find rtty binary: %w", err)
 	}
 
-	if err := e.runner.KillExisting(ctx); err != nil {
-		return Output{}, fmt.Errorf("kill existing rtty: %w", err)
+	cert, key := e.findCertAndKey()
+	if cert == "" || key == "" {
+		return Output{}, ErrMTLSCertNotFound
 	}
 
 	args := []string{
@@ -251,11 +252,11 @@ func (e *VyOSRTTYExecutor) Execute(ctx context.Context, msg agentcore.ActionComm
 	if payload.Timeout > 0 {
 		args = append(args, "-e", strconv.Itoa(payload.Timeout))
 	}
-	cert, key := e.findCertAndKey()
-	if cert == "" || key == "" {
-		return Output{}, ErrMTLSCertNotFound
-	}
 	args = append(args, "-c", cert, "-k", key)
+
+	if err := e.runner.KillExisting(ctx); err != nil {
+		return Output{}, fmt.Errorf("kill existing rtty: %w", err)
+	}
 
 	if err := e.runner.Start(bin, args); err != nil {
 		return Output{}, fmt.Errorf("launch rtty: %w", err)
