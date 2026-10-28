@@ -25,7 +25,10 @@ type RTTYProcessRunner interface {
 	Start(bin string, args []string) error
 }
 
-type RealRTTYProcessRunner struct{}
+type RealRTTYProcessRunner struct {
+	mu        sync.Mutex
+	activePID int
+}
 
 func NewRealRTTYProcessRunner() RTTYProcessRunner {
 	return &RealRTTYProcessRunner{}
@@ -49,15 +52,41 @@ func (r *RealRTTYProcessRunner) FindBinary() (string, error) {
 }
 
 func (r *RealRTTYProcessRunner) KillExisting(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "pkill", "-x", "rtty")
-	if err := cmd.Run(); err != nil {
-		var exitErr *exec.ExitError
-		// pkill exit code 1 means no matching processes were found, which is normal.
-		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
-			return nil
-		}
-		log.Printf("rtty: kill existing process failed: %v", err)
+	r.mu.Lock()
+	pid := r.activePID
+	r.activePID = 0
+	r.mu.Unlock()
+
+	if pid <= 0 {
+		return nil
 	}
+
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return nil
+	}
+
+	// Send SIGTERM to our tracked PID
+	_ = proc.Signal(syscall.SIGTERM)
+
+	// Wait briefly (up to 200ms) for the process to exit and release resources
+	for i := 0; i < 20; i++ {
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			break // Process has exited
+		}
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-ctx.Done():
+			_ = proc.Kill()
+			return ctx.Err()
+		}
+	}
+
+	// Escalate to SIGKILL if it didn't exit within grace period
+	if err := proc.Signal(syscall.Signal(0)); err == nil {
+		_ = proc.Kill()
+	}
+
 	return nil
 }
 
@@ -65,6 +94,9 @@ func (r *RealRTTYProcessRunner) KillExisting(ctx context.Context) error {
 // terminal session outlives the NATS command invocation. Its lifecycle is governed
 // by OWGW socket disconnection, user logout, or preemption by KillExisting.
 func (r *RealRTTYProcessRunner) Start(bin string, args []string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	cmd := exec.Command(bin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
@@ -72,10 +104,33 @@ func (r *RealRTTYProcessRunner) Start(bin string, args []string) error {
 		return fmt.Errorf("start rtty: %w", err)
 	}
 
+	pid := cmd.Process.Pid
+	r.activePID = pid
+
 	done := make(chan error, 1)
-	go func() {
-		done <- cmd.Wait()
-	}()
+	go func(p int) {
+		err := cmd.Wait()
+		select {
+		case done <- err:
+		default:
+		}
+
+		r.mu.Lock()
+		if r.activePID == p {
+			r.activePID = 0
+		}
+		r.mu.Unlock()
+
+		if err != nil {
+			var exitErr *exec.ExitError
+			if errors.As(err, &exitErr) {
+				if status, ok := exitErr.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+					return // Terminated intentionally by SIGTERM/SIGKILL
+				}
+			}
+			log.Printf("rtty process (PID %d) exited with error: %v", p, err)
+		}
+	}(pid)
 
 	// The 50ms wait is an OS-level startup sanity check to catch immediate startup failures
 	// (e.g. dynamic linker errors like missing libev, invalid CLI flags, or permission errors)
