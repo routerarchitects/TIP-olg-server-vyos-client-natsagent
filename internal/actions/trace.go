@@ -4,6 +4,7 @@ import "errors"
 
 const (
 	ActionTrace = "trace"
+	ActionRTTY  = "rtty"
 )
 
 var (

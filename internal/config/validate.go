@@ -36,7 +36,7 @@ func (c AppConfig) Validate() error {
 	}
 	seenActions := make(map[string]bool)
 	for _, action := range c.Agent.Actions.Enabled {
-		if action != "trace" {
+		if action != "trace" && action != "rtty" {
 			return fmt.Errorf("agent.actions.enabled contains unsupported action %q", action)
 		}
 		if seenActions[action] {
