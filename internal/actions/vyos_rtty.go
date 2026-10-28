@@ -26,8 +26,10 @@ type RTTYProcessRunner interface {
 }
 
 type RealRTTYProcessRunner struct {
-	mu        sync.Mutex
-	activePID int
+	mu         sync.Mutex
+	activePID  int
+	activeCmd  *exec.Cmd
+	activeDone chan struct{}
 }
 
 func NewRealRTTYProcessRunner() RTTYProcessRunner {
@@ -53,41 +55,47 @@ func (r *RealRTTYProcessRunner) FindBinary() (string, error) {
 
 func (r *RealRTTYProcessRunner) KillExisting(ctx context.Context) error {
 	r.mu.Lock()
-	pid := r.activePID
+	cmd := r.activeCmd
+	done := r.activeDone
+	r.activeCmd = nil
+	r.activeDone = nil
 	r.activePID = 0
 	r.mu.Unlock()
 
-	if pid <= 0 {
+	if cmd == nil || cmd.Process == nil {
 		return nil
 	}
 
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return nil
+	// 1. Send SIGTERM to the process
+	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		log.Printf("rtty: signal SIGTERM to PID %d failed: %v", cmd.Process.Pid, err)
 	}
 
-	// Send SIGTERM to our tracked PID
-	_ = proc.Signal(syscall.SIGTERM)
+	// 2. Wait for exit confirmation
+	select {
+	case <-done:
+		return nil // Process exited gracefully after SIGTERM
 
-	// Wait briefly (up to 200ms) for the process to exit and release resources
-	for i := 0; i < 20; i++ {
-		if err := proc.Signal(syscall.Signal(0)); err != nil {
-			break // Process has exited
+	case <-time.After(200 * time.Millisecond):
+		// 3. Escalate to SIGKILL if not exited within grace period
+		if err := cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+			log.Printf("rtty: force kill PID %d failed: %v", cmd.Process.Pid, err)
 		}
+
+		// 4. Confirm process exit after SIGKILL
 		select {
-		case <-time.After(10 * time.Millisecond):
+		case <-done:
+			return nil // Confirmed exited after SIGKILL
+		case <-time.After(500 * time.Millisecond):
+			return fmt.Errorf("timeout waiting for rtty process (PID %d) termination", cmd.Process.Pid)
 		case <-ctx.Done():
-			_ = proc.Kill()
 			return ctx.Err()
 		}
-	}
 
-	// Escalate to SIGKILL if it didn't exit within grace period
-	if err := proc.Signal(syscall.Signal(0)); err == nil {
-		_ = proc.Kill()
+	case <-ctx.Done():
+		_ = cmd.Process.Kill()
+		return ctx.Err()
 	}
-
-	return nil
 }
 
 // Start launches rtty detached from the short-lived action RPC context so the
@@ -106,18 +114,24 @@ func (r *RealRTTYProcessRunner) Start(bin string, args []string) error {
 
 	pid := cmd.Process.Pid
 	r.activePID = pid
+	r.activeCmd = cmd
+	activeDone := make(chan struct{})
+	r.activeDone = activeDone
 
 	done := make(chan error, 1)
-	go func(p int) {
-		err := cmd.Wait()
+	go func(c *exec.Cmd, p int, exitCh chan struct{}) {
+		err := c.Wait()
 		select {
 		case done <- err:
 		default:
 		}
+		close(exitCh)
 
 		r.mu.Lock()
 		if r.activePID == p {
 			r.activePID = 0
+			r.activeCmd = nil
+			r.activeDone = nil
 		}
 		r.mu.Unlock()
 
@@ -130,7 +144,7 @@ func (r *RealRTTYProcessRunner) Start(bin string, args []string) error {
 			}
 			log.Printf("rtty process (PID %d) exited with error: %v", p, err)
 		}
-	}(pid)
+	}(cmd, pid, activeDone)
 
 	// The 50ms wait is an OS-level startup sanity check to catch immediate startup failures
 	// (e.g. dynamic linker errors like missing libev, invalid CLI flags, or permission errors)

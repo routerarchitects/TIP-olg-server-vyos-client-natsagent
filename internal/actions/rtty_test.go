@@ -543,3 +543,34 @@ func TestRealRTTYProcessRunner_ContextCanceled(t *testing.T) {
 		t.Fatalf("expected context.Canceled, got: %v", err)
 	}
 }
+
+func TestRealRTTYProcessRunner_SIGKILLEscalation(t *testing.T) {
+	runner := &RealRTTYProcessRunner{}
+	bin, err := exec.LookPath("sh")
+	if err != nil {
+		t.Skip("sh binary not found")
+	}
+
+	// Launch a process that traps and ignores SIGTERM
+	if err := runner.Start(bin, []string{"-c", "trap '' TERM; sleep 5"}); err != nil {
+		t.Fatalf("start failed: %v", err)
+	}
+
+	ctx := context.Background()
+	start := time.Now()
+	if err := runner.KillExisting(ctx); err != nil {
+		t.Fatalf("expected clean exit after SIGKILL escalation, got: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	// Since SIGTERM was ignored, it must have waited 200ms before escalating to SIGKILL
+	if elapsed < 190*time.Millisecond {
+		t.Fatalf("expected escalation after ~200ms, took %v", elapsed)
+	}
+
+	runner.mu.Lock()
+	defer runner.mu.Unlock()
+	if runner.activePID != 0 || runner.activeCmd != nil || runner.activeDone != nil {
+		t.Fatalf("expected all runner state cleared after KillExisting")
+	}
+}
