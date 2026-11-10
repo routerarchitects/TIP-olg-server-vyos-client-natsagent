@@ -142,6 +142,10 @@ agent:
   actions:
     enabled:
       - trace
+
+  state:
+    enabled: true
+    interval: 60s
 ```
 
 ## 9. Agentcore config section
@@ -657,7 +661,9 @@ Action success:
 }
 ```
 
-## 23. Status publishing
+## 23. Status & device state publishing
+
+### 23.1 Lifecycle & progress status publishing
 
 Status publishing is allowed for startup/running/progress messages.
 
@@ -673,6 +679,122 @@ Minimum startup status:
   "timestamp": "2026-05-12T10:30:00Z"
 }
 ```
+
+### 23.2 Periodic device state collection & publishing
+
+The VyOS NATS agent runs directly on the router appliance and is the authoritative source for host operational state, networking interface metrics, physical port link states, and network neighbors.
+
+It gathers metrics and periodically publishes a structured state snapshot over NATS (`state.<target>` or `status.<target>`) to be consumed by the uCentral client and forwarded upstream to the OpenWiFi Cloud Gateway.
+
+```mermaid
+flowchart LR
+    A["Linux Host (/proc, sysfs, iproute2)"] --> B["State Collector (internal/devicestate)"]
+    C["Local State (/tmp/.../state.json)"] -->|applied UUID| B
+    B -->|Periodic 60s Ticker| D["NATS Publisher"]
+    D -->|state.vyos| E["uCentral Client"]
+```
+
+#### Metrics Data Sources
+
+| State Section | Metric Fields | Linux / VyOS Source |
+| :--- | :--- | :--- |
+| **`unit.load`** | `[1m, 5m, 15m]` load averages | `/proc/loadavg` |
+| **`unit.cpu_load`** | Aggregate & per-core CPU load % | `/proc/stat` |
+| **`unit.memory`** | `total`, `free`, `cached`, `buffered` RAM (bytes) | `/proc/meminfo` |
+| **`unit.uptime`** | Seconds since boot (integer) | `/proc/uptime` |
+| **`unit.localtime`** | Current epoch timestamp | Standard system clock |
+| **`interfaces`** | Name, interface uptime, IP addresses | `ip -j addr`, `ip -j link` |
+| **`interfaces.counters`** | Cumulative rx/tx bytes, packets, errors, drops | `/sys/class/net/<iface>/statistics/` or `/proc/net/dev` |
+| **`interfaces.delta_counters`** | Byte/packet increment since previous sampling tick | In-memory delta computation |
+| **`interfaces.clients`** | Discovered ARP/NDP neighbor table (MAC, IP, ports) | `ip -j neigh` or `/proc/net/arp` |
+| **`link-state`** | `carrier` (bool), `speed` (Mbps), `duplex` (`full`/`half`) | `/sys/class/net/<iface>/{carrier,speed,duplex}` |
+| **`lldp-peers`** | Connected switches/routers announcing via LLDP | `lldpcli -f json show neighbors` (empty `{}` if inactive) |
+| **`radios`** | Always empty array `[]` (wired router has no wireless) | Schema compliance guard for Gateway compatibility |
+| **`uuid`** | Current applied configuration UUID | Read from local state file (`/tmp/vyos-nats-agent/state.json`) |
+
+#### Published State Wire Schema
+
+```json
+{
+  "version": 1,
+  "uuid": 1793880893,
+  "target": "vyos",
+  "state": {
+    "version": 1,
+    "unit": {
+      "load": [ 0.15, 0.08, 0.05 ],
+      "cpu_load": [ 4, 5, 3, 4, 4 ],
+      "localtime": 1793968533,
+      "memory": {
+        "total": 4124565504,
+        "free": 3201454080,
+        "cached": 450123776,
+        "buffered": 89456640
+      },
+      "uptime": 119483
+    },
+    "interfaces": [
+      {
+        "name": "eth0",
+        "location": "/interfaces/0",
+        "uptime": 23061,
+        "ipv4": {
+          "addresses": [ "172.16.1.228/21" ],
+          "dhcp_server": "172.16.0.1",
+          "leasetime": 43200
+        },
+        "counters": {
+          "rx_bytes": 1051992836,
+          "rx_packets": 5440208,
+          "tx_bytes": 4403888,
+          "tx_packets": 27885,
+          "rx_dropped": 0,
+          "rx_errors": 0,
+          "tx_dropped": 0,
+          "tx_errors": 0,
+          "multicast": 884271,
+          "collisions": 0
+        },
+        "delta_counters": {
+          "rx_bytes": 659383,
+          "rx_packets": 3852,
+          "tx_bytes": 4141,
+          "tx_packets": 17
+        },
+        "clients": [
+          {
+            "mac": "00:09:0f:09:80:04",
+            "ipv4_addresses": [ "172.16.0.1" ],
+            "ports": [ "eth0" ],
+            "last_seen": 0
+          }
+        ]
+      }
+    ],
+    "link-state": {
+      "upstream": {
+        "eth0": { "carrier": 1, "speed": 1000, "duplex": "full" }
+      },
+      "downstream": {
+        "eth1": { "carrier": 0, "speed": 0, "duplex": "unknown" }
+      }
+    },
+    "lldp-peers": {
+      "upstream": {},
+      "downstream": {}
+    },
+    "radios": []
+  },
+  "timestamp": "2026-05-12T10:30:00Z"
+}
+```
+
+#### Lifecycle & Concurrency Rules
+
+1. **Independent Routine:** The State Collector runs in a dedicated background goroutine started during `Runtime.Run(ctx)`.
+2. **Delta Calculation:** The collector caches the previous interface counter snapshot in memory. On each tick, it computes the delta before updating the stored cache.
+3. **Non-Blocking Sampling:** Collecting metrics from `/proc` and `/sys` is done using fast direct file reads or netlink calls with a strict 3-second timeout to avoid locking agent threads.
+4. **Publish Failure Resilience:** If NATS publishing fails (e.g. during broker reconnects), the collector logs a warning, preserves counter baselines, and continues on the next scheduled interval without crashing the daemon.
 
 ## 24. Startup reconcile
 
