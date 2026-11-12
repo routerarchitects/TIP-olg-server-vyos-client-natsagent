@@ -684,14 +684,20 @@ Minimum startup status:
 
 The VyOS NATS agent runs directly on the router appliance and is the authoritative source for host operational state, networking interface metrics, physical port link states, and network neighbors.
 
-It gathers metrics and periodically publishes a structured state snapshot over NATS (`state.<target>` or `status.<target>`) to be consumed by the uCentral client and forwarded upstream to the OpenWiFi Cloud Gateway.
+It gathers metrics and periodically publishes a structured state snapshot exclusively over NATS on `state.<target>` to be consumed by the uCentral client and forwarded upstream to the OpenWiFi Cloud Gateway.
+
+#### Subject Routing & Separation Rules
+
+* **Exclusive `state.<target>` routing:** Periodic operational state MUST be published exclusively on `state.<target>`.
+* **Separation from `status.<target>`:** The existing `status.<target>` subject is strictly reserved for lifecycle events (e.g. startup) and configure/action execution progress. These are not interchangeable message types: periodic device state has a completely different schema and purpose. Publishing full device-state payloads on the status subject could cause consumers to interpret them as progress/status messages or reject them as invalid.
+* **Agentcore prerequisite:** Support for the dedicated `state.<target>` subject in `agentcore` (`DefaultStatePattern = "state.%s"`, `PublishState`, and `RegisterStateHandler`) must be implemented or verified before state publishing is enabled.
 
 ```mermaid
 flowchart LR
     A["Linux Host (/proc, sysfs, iproute2)"] --> B["State Collector (internal/devicestate)"]
     C["Local State (/tmp/.../state.json)"] -->|applied UUID| B
-    B -->|Periodic 60s Ticker| D["NATS Publisher"]
-    D -->|state.vyos| E["uCentral Client"]
+    B -->|Periodic 60s Ticker| D["NATS Publisher (agentcore.PublishState)"]
+    D -->|state.vyos (StateEnvelope)| E["uCentral Client"]
 ```
 
 #### Metrics Data Sources
@@ -712,14 +718,16 @@ flowchart LR
 | **`radios`** | Always empty array `[]` (wired router has no wireless) | Schema compliance guard for Gateway compatibility |
 | **`uuid`** | Current applied configuration UUID | Read from local state file (`/tmp/vyos-nats-agent/state.json`) |
 
-#### Published State Wire Schema
+#### Published State Wire Schema (`agentcore.StateEnvelope`)
+
+The agent wraps the device telemetry snapshot inside a standard `agentcore.StateEnvelope` and publishes it via `client.PublishState(ctx, envelope)`. The outer envelope standardizes wire versioning, target identity, applied config UUID correlation, and timestamps, while the inner `payload` carries the OpenWiFi-compliant router state:
 
 ```json
 {
-  "version": 1,
-  "uuid": 1793880893,
+  "version": "1.0",
+  "uuid": "1793880893",
   "target": "vyos",
-  "state": {
+  "payload": {
     "version": 1,
     "unit": {
       "load": [ 0.15, 0.08, 0.05 ],

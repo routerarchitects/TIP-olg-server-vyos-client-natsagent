@@ -20,8 +20,9 @@ The default mode is intentionally safe for CI and local development: configure u
 - Performs startup configuration reconciliation to sync local state with the latest KV configuration on initialization.
 - Triggers automatic configuration reconciliation on reconnecting to NATS to sync offline updates.
 - Supports both placeholder trace execution and real trace execution using `tcpdump` and HTTP multipart streaming upload.
-- Periodically collects and publishes host metrics (/proc), network interface counters, link-state, and discovered neighbors to NATS matching the OpenWiFi state schema.
-- Publishes result and status messages to the bus.
+- Periodically collects host metrics (/proc), network interface counters, link-state, and discovered neighbors, publishing state snapshots exclusively on `state.<target>` via `agentcore.PublishState(...)` using `agentcore.StateEnvelope`.
+- Publishes result, status, and state messages to the bus (`agentcore.PublishResult`, `agentcore.PublishStatus`, `agentcore.PublishState`).
+- Maintains strict subject separation: `state.<target>` is used exclusively for periodic operational telemetry, while `status.<target>` remains strictly reserved for startup lifecycle and configure/action execution progress.
 
 ## What is out of scope
 
