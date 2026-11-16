@@ -20,9 +20,10 @@ The default mode is intentionally safe for CI and local development: configure u
 - Performs startup configuration reconciliation to sync local state with the latest KV configuration on initialization.
 - Triggers automatic configuration reconciliation on reconnecting to NATS to sync offline updates.
 - Supports both placeholder trace execution and real trace execution using `tcpdump` and HTTP multipart streaming upload.
-- Periodically collects host metrics (/proc), network interface counters, link-state, and discovered neighbors, publishing state snapshots exclusively on `state.<target>` via `agentcore.PublishState(...)` using `agentcore.StateEnvelope`.
+- Periodically collects router operational metrics (/proc, /sys), network interface counters, link-state, and discovered neighbors from the VyOS environment, publishing state snapshots exclusively on `state.<target>` via `agentcore.PublishState(...)` using `agentcore.StateEnvelope`.
+- Supports on-demand live state queries via request-reply on `state.get.<target>`, gathering and returning live metrics from the VyOS environment immediately upon request.
 - Publishes result, status, and state messages to the bus (`agentcore.PublishResult`, `agentcore.PublishStatus`, `agentcore.PublishState`).
-- Maintains strict subject separation: `state.<target>` is used exclusively for periodic operational telemetry, while `status.<target>` remains strictly reserved for startup lifecycle and configure/action execution progress.
+- Maintains strict subject separation: `state.<target>` and `state.get.<target>` are used exclusively for periodic and on-demand operational telemetry, while `status.<target>` and `status.get.<target>` remain strictly reserved for startup lifecycle and configure/action execution progress.
 
 ## What is out of scope
 

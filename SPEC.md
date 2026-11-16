@@ -682,22 +682,38 @@ Minimum startup status:
 
 ### 23.2 Periodic device state collection & publishing
 
-The VyOS NATS agent runs directly on the router appliance and is the authoritative source for host operational state, networking interface metrics, physical port link states, and network neighbors.
+The VyOS NATS agent runs directly within the VyOS router runtime environment (such as a VyOS VM or bare-metal VyOS appliance) and is the authoritative source for the router's operational state, network interface counters, physical and logical port link states, and network neighbors.
 
 It gathers metrics and periodically publishes a structured state snapshot exclusively over NATS on `state.<target>` to be consumed by the uCentral client and forwarded upstream to the OpenWiFi Cloud Gateway.
+
+#### 23.2.1 Execution Environment & Metric Scoping
+
+* **Execution Boundary:** `vyos-nats-agent` executes inside the VyOS router runtime environment (VyOS VM or bare-metal appliance) with direct access to local VyOS configuration APIs.
+* **Metric Scoping:** All telemetry (`/proc`, `/sys`, `iproute2`, LLDP) reflects the **VyOS Router Appliance** (guest CPU/RAM, routing interfaces, and routed client neighbors), not the underlying Ubuntu hypervisor host. Host bare-metal infrastructure monitoring is handled out-of-band and is decoupled from OpenWiFi router state.
 
 #### Subject Routing & Separation Rules
 
 * **Exclusive `state.<target>` routing:** Periodic operational state MUST be published exclusively on `state.<target>`.
-* **Separation from `status.<target>`:** The existing `status.<target>` subject is strictly reserved for lifecycle events (e.g. startup) and configure/action execution progress. These are not interchangeable message types: periodic device state has a completely different schema and purpose. Publishing full device-state payloads on the status subject could cause consumers to interpret them as progress/status messages or reject them as invalid.
-* **Agentcore prerequisite:** Support for the dedicated `state.<target>` subject in `agentcore` (`DefaultStatePattern = "state.%s"`, `PublishState`, and `RegisterStateHandler`) must be implemented or verified before state publishing is enabled.
+* **On-Demand live query (`state.get.<target>`):** The agent registers a request-reply handler on `state.get.<target>`. When a query arrives, it collects fresh router metrics (/proc, sysfs, Netlink) immediately and responds on the reply inbox with an `agentcore.StateEnvelope`.
+* **Separation from `status.<target>` and `status.get.<target>`:** The existing `status.<target>` and `status.get.<target>` subjects are strictly reserved for lifecycle events (e.g. startup) and configure/action execution progress. These are not interchangeable message types: periodic and on-demand device state have a completely different schema and purpose. Publishing full device-state payloads on the status subjects could cause consumers to interpret them as progress/status messages or reject them as invalid.
+* **Agentcore prerequisite:** Support for dedicated `state.<target>` and `state.get.<target>` subjects in `agentcore` (`DefaultStatePattern = "state.%s"`, `DefaultStateGetPattern = "state.get.%s"`, `PublishState`, `RegisterStateHandler`, and `RegisterStateGetHandler`) must be implemented or verified before state features are enabled.
 
-```mermaid
-flowchart LR
-    A["Linux Host (/proc, sysfs, iproute2)"] --> B["State Collector (internal/devicestate)"]
-    C["Local State (/tmp/.../state.json)"] -->|applied UUID| B
-    B -->|Periodic 60s Ticker| D["NATS Publisher (agentcore.PublishState)"]
-    D -->|state.vyos (StateEnvelope)| E["uCentral Client"]
+```text
++---------------------------------------------------------------------------------------------------+
+|                                 VYOS NATS AGENT STATE TELEMETRY                                   |
+|                                                                                                   |
+|  [ VyOS Router Environment (/proc, sysfs, iproute2) ]                                            |
+|       │                                           ▲                                               |
+|       ▼ (Periodic collection)                     │ (On-Demand live query)                        |
+|  [ Periodic State Collector ]              [ On-Demand Responder (state.get.<target>) ]           |
+|       │                                           ▲                                               |
+|       ▼                                           │ (Request)                                     |
+|  [ NATS: state.<target> ]                  [ NATS: state.get.<target> ]                           |
+|  (Publish StateEnvelope)                   (Request-Reply / Live State)                           |
++───────┼───────────────────────────────────────────▲───────────────────────────────────────────────+
+        │                                           │
+        ▼ (Periodic State)                          │ (Live Query)
+   [ uCentral Client ] ─────────────────────────────┘
 ```
 
 #### Metrics Data Sources
@@ -712,15 +728,69 @@ flowchart LR
 | **`interfaces`** | Name, interface uptime, IP addresses | `ip -j addr`, `ip -j link` |
 | **`interfaces.counters`** | Cumulative rx/tx bytes, packets, errors, drops | `/sys/class/net/<iface>/statistics/` or `/proc/net/dev` |
 | **`interfaces.delta_counters`** | Byte/packet increment since previous sampling tick | In-memory delta computation |
-| **`interfaces.clients`** | Discovered ARP/NDP neighbor table (MAC, IP, ports) | `ip -j neigh` or `/proc/net/arp` |
+| **`interfaces.clients`** | Observed L3 network neighbors (filtered MAC, IP, ports) | `ip -j neigh` (filtered) with optional DHCP lease / Bridge FDB reconciliation |
 | **`link-state`** | `carrier` (bool), `speed` (Mbps), `duplex` (`full`/`half`) | `/sys/class/net/<iface>/{carrier,speed,duplex}` |
 | **`lldp-peers`** | Connected switches/routers announcing via LLDP | `lldpcli -f json show neighbors` (empty `{}` if inactive) |
-| **`radios`** | Always empty array `[]` (wired router has no wireless) | Schema compliance guard for Gateway compatibility |
-| **`uuid`** | Current applied configuration UUID | Read from local state file (`/tmp/vyos-nats-agent/state.json`) |
+| **`radios`** | Radio metrics (channel, frequency, tx_power, active SSIDs) | Populated via `nl80211`/`iw` when Wi-Fi hardware is present; empty array `[]` on purely wired appliances |
+| **`uuid`** | Current applied configuration UUID | Read from local state file (`/tmp/vyos-nats-agent/state.json`). Formatted as decimal string (e.g. `"1793880893"`), or `""`/`"0"` if no configuration has been applied yet. |
+
+#### 23.2.2 Neighbor Discovery & Client Telemetry Semantics (`interfaces.clients`)
+
+The `interfaces.clients` list represents **observed L3 network neighbors** rather than an authoritative connected-client inventory. In routed Linux environments, ARP/NDP caches reflect recently resolved IP-to-MAC mappings, meaning idle clients may age out while stale entries can linger.
+
+The collector applies the following rules when processing neighbors:
+
+1. **Neighbor State Filtering:**
+   * Entries extracted from `ip -j neigh` with states `FAILED`, `INCOMPLETE`, or `NOARP` are discarded.
+   * Only active/valid neighbor states are retained: `REACHABLE`, `PERMANENT`, `STALE`, `DELAY`, and `PROBE`.
+2. **Deduplication by MAC Address:**
+   * In dual-stack networks, a single client MAC often has both IPv4 and IPv6 (link-local and SLAAC/GUA) addresses.
+   * Neighbors are grouped by normalized MAC address (`strings.ToLower(mac)`). Multiple IP addresses are aggregated into the `ipv4_addresses` and `ipv6_addresses` arrays within a single `InterfaceClient` record rather than emitting duplicate client entries.
+3. **Bridge and VLAN Interface Attribution:**
+   * For bridge interfaces (e.g., `br0`), `ip -j neigh` attributes the neighbor to the bridge master device. Where bridge forwarding table lookup (`bridge -j fdb show`) resolves the MAC to a physical bridge port (e.g., `eth1`), `ports: ["eth1"]` is populated; otherwise, the interface name itself is used (`ports: ["br0"]`).
+   * For 802.1Q VLAN interfaces (e.g., `eth1.100`), the client is attributed to the specific VLAN subinterface under which the neighbor was resolved.
+4. **`last_seen` Semantics:**
+   * For `REACHABLE` neighbors: `last_seen` is set to current epoch seconds (or `0` to denote active confirmation).
+   * For `STALE` or `DELAY` neighbors: `last_seen` reflects the timestamp of the last confirmed L3 activity before transitioning to stale.
+5. **Reconciliation for Authoritative Connected Clients:**
+   * When an authoritative connected-device inventory is required by the Gateway/UI, the collector reconciles multiple sources:
+     * **L2 Physical Link Presence:** Learned dynamic MACs from `bridge -j fdb show` and Wi-Fi station dumps (`nl80211`/`iw`).
+     * **L3 Address Assignment:** Active DHCP lease files (e.g., Kea/ISC DHCP leases).
+     * **L3 Activity:** Filtered ARP/NDP cache (`ip -j neigh`).
+   * Merging these sources produces a unified inventory containing client hostnames, lease expiration, verified L2 port presence, and L3 activity timestamps.
+
+#### 23.2.3 Applied Configuration UUID Checkpoint & Concurrency Semantics
+
+The configuration UUID published in `StateEnvelope.UUID` correlates the router's active operational state with the controller's configuration transactions:
+
+1. **Source & Type (`state.State{AppliedUUID string}`):** Sourced from the local state checkpoint (`internal/state/store.go`). It is represented as a string on the NATS envelope (carrying decimal timestamp strings such as `"1793880893"`).
+2. **Only Last Successfully Applied UUID:** The agent updates `AppliedUUID` only after a configuration transaction is committed successfully (`Result: success`). If an apply attempt fails validation or triggers a rollback (`Result: rolled_back`), `AppliedUUID` preserves the last-known-good active UUID. Failed or pending configurations are never reported.
+3. **Distinguishing Absent/Corrupt Checkpoint from `UUID = "0"`:**
+   * **`UUID = "0"`:** Explicitly denotes that the device has applied an initial/baseline or factory-default configuration.
+   * **Absent Checkpoint (file missing):** Fresh, unconfigured boot before any configuration has occurred; reported as empty `UUID: ""`.
+   * **Corrupt Checkpoint (unparseable JSON on disk):** Treated as empty `UUID: ""` and logged as a warning, preventing collector crashes.
+4. **Race-Free Checkpoint Access (Concurrency Safety):** `FileStore.Save()` writes to a temporary file (`.state-*.tmp`), syncs to disk (`tmpFile.Sync()`), and replaces the destination using a POSIX atomic rename (`os.Rename()`). Consequently, concurrent reads by `FileStore.Load()` during state collection are completely race-free and will never read torn or partially written data.
+
+#### 23.2.4 Interface Delta Counter Computation & Reset Semantics (`interfaces.delta_counters`)
+
+To mirror OpenWiFi AP behavior and prevent counter corruption or graph spikes, the state collector implements baseline tracking and reset detection for `interfaces.delta_counters`:
+
+1. **In-Memory Baseline per Interface:** The collector maintains an in-memory map keyed by interface name / `ifindex`:
+   `previous_counters[iface] = { rx_bytes, tx_bytes, rx_packets, tx_packets, last_sampled_at }`
+2. **First Sample Behavior (Cold Boot / New Interface):** On agent startup or when an interface is newly discovered, establish the baseline sample. Set all `delta_counters` fields to `0` on the initial report to prevent historical cumulative counters from appearing as a single-interval traffic spike.
+3. **Reset & Underflow Detection (`current < previous`):** If an interface restarts (`down`/`up`), a VLAN/tunnel interface is recreated, or the driver counter resets, `current < previous` occurs. The collector must detect this condition, treat `current` as the new baseline, and emit `delta = 0` (or `current` if resetting from zero). It MUST NOT perform direct unsigned subtraction (`current - previous`), which causes a massive `uint64` integer underflow.
+4. **Interface Pruning & Lifecycle:** If an interface disappears from the system, its baseline entry is purged from memory. If it reappears later, it starts fresh from Step 2 with a zero-delta baseline.
+5. **Elapsed Time Measurement:** The collector records `last_sampled_at` with each baseline, ensuring accurate elapsed time $\Delta t$ calculation across variable periodic intervals and on-demand live queries.
+6. **Required Unit Test Matrix:** Implement unit test coverage for:
+   * **Initial Baseline:** First sample produces zero deltas.
+   * **Monotonic Increments:** Normal delta calculation when `current >= previous`.
+   * **Counter Reset:** `current < previous` safely resets baseline and emits zero delta without underflow.
+   * **Interface Lifecycle:** Missing interfaces are pruned; reappearing interfaces establish a new baseline.
+   * **Reconnect Gaps:** Variable interval timing preserves accurate delta rates.
 
 #### Published State Wire Schema (`agentcore.StateEnvelope`)
 
-The agent wraps the device telemetry snapshot inside a standard `agentcore.StateEnvelope` and publishes it via `client.PublishState(ctx, envelope)`. The outer envelope standardizes wire versioning, target identity, applied config UUID correlation, and timestamps, while the inner `payload` carries the OpenWiFi-compliant router state:
+The agent wraps the device telemetry snapshot inside a standard `agentcore.StateEnvelope` and publishes it via `client.PublishState(ctx, envelope)`. The outer envelope standardizes wire versioning, target identity, applied config UUID correlation, and timestamps, while the inner `payload` carries pure OpenWiFi-compliant router telemetry (excluding inner `serial` or `uuid` to avoid inner/outer identity ambiguity):
 
 ```json
 {
