@@ -781,10 +781,10 @@ The agent wraps the device telemetry snapshot inside a standard `agentcore.State
     ],
     "link-state": {
       "upstream": {
-        "eth0": { "carrier": 1, "speed": 1000, "duplex": "full" }
+        "eth0": { "carrier": true, "speed": 1000, "duplex": "full" }
       },
       "downstream": {
-        "eth1": { "carrier": 0, "speed": 0, "duplex": "unknown" }
+        "eth1": { "carrier": false, "speed": 0 }
       }
     },
     "lldp-peers": {
