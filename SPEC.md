@@ -145,7 +145,7 @@ agent:
 
   state:
     enabled: true
-    interval: 60s
+    interval: 60s # Initial boot/fallback default. Authoritatively overridden by Cloud metrics.statistics.interval
 ```
 
 ## 9. Agentcore config section
@@ -694,7 +694,7 @@ It gathers metrics and periodically publishes a structured state snapshot exclus
 #### Subject Routing & Separation Rules
 
 * **Exclusive `state.<target>` routing:** Periodic operational state MUST be published exclusively on `state.<target>`.
-* **On-Demand live query (`state.get.<target>`):** The agent registers a request-reply handler on `state.get.<target>`. When a query arrives, it collects fresh router metrics (/proc, sysfs, Netlink) immediately and responds on the reply inbox with an `agentcore.StateEnvelope`.
+* **On-Demand live query (`state.get.<target>`):** The agent registers a request-reply handler on `state.get.<target>`. When a query arrives, it collects fresh router metrics (/proc, sysfs, Netlink) immediately, computes transient deltas without mutating or advancing the periodic baseline, and responds on the reply inbox with an `agentcore.StateEnvelope`.
 * **Separation from `status.<target>` and `status.get.<target>`:** The existing `status.<target>` and `status.get.<target>` subjects are strictly reserved for lifecycle events (e.g. startup) and configure/action execution progress. These are not interchangeable message types: periodic and on-demand device state have a completely different schema and purpose. Publishing full device-state payloads on the status subjects could cause consumers to interpret them as progress/status messages or reject them as invalid.
 * **Agentcore prerequisite:** Support for dedicated `state.<target>` and `state.get.<target>` subjects in `agentcore` (`DefaultStatePattern = "state.%s"`, `DefaultStateGetPattern = "state.get.%s"`, `PublishState`, `RegisterStateHandler`, and `RegisterStateGetHandler`) must be implemented or verified before state features are enabled.
 
@@ -776,17 +776,35 @@ The configuration UUID published in `StateEnvelope.UUID` correlates the router's
 To mirror OpenWiFi AP behavior and prevent counter corruption or graph spikes, the state collector implements baseline tracking and reset detection for `interfaces.delta_counters`:
 
 1. **In-Memory Baseline per Interface:** The collector maintains an in-memory map keyed by interface name / `ifindex`:
-   `previous_counters[iface] = { rx_bytes, tx_bytes, rx_packets, tx_packets, last_sampled_at }`
+   `periodic_counters[iface] = { rx_bytes, tx_bytes, rx_packets, tx_packets, last_sampled_at }`
 2. **First Sample Behavior (Cold Boot / New Interface):** On agent startup or when an interface is newly discovered, establish the baseline sample. Set all `delta_counters` fields to `0` on the initial report to prevent historical cumulative counters from appearing as a single-interval traffic spike.
 3. **Reset & Underflow Detection (`current < previous`):** If an interface restarts (`down`/`up`), a VLAN/tunnel interface is recreated, or the driver counter resets, `current < previous` occurs. The collector must detect this condition, treat `current` as the new baseline, and emit `delta = 0` (or `current` if resetting from zero). It MUST NOT perform direct unsigned subtraction (`current - previous`), which causes a massive `uint64` integer underflow.
 4. **Interface Pruning & Lifecycle:** If an interface disappears from the system, its baseline entry is purged from memory. If it reappears later, it starts fresh from Step 2 with a zero-delta baseline.
-5. **Elapsed Time Measurement:** The collector records `last_sampled_at` with each baseline, ensuring accurate elapsed time $\Delta t$ calculation across variable periodic intervals and on-demand live queries.
-6. **Required Unit Test Matrix:** Implement unit test coverage for:
+5. **Periodic Baseline Isolation (No Mutation by On-Demand Queries):** The periodic reporting loop has exclusive write ownership over `periodic_counters`. An on-demand live query (`state.get.<target>`) reads current kernel counters and computes transient delta values against `periodic_counters` for the on-demand response, but MUST NOT overwrite or advance `periodic_counters` or its timestamp. This ensures that the scheduled periodic reporting interval (e.g. 60s) and its bandwidth delta metrics are never distorted by ad-hoc queries.
+6. **Elapsed Time Measurement:** The collector records `last_sampled_at` with each baseline, ensuring accurate elapsed time $\Delta t$ calculation across scheduled intervals.
+7. **Required Unit Test Matrix:** Implement unit test coverage for:
    * **Initial Baseline:** First sample produces zero deltas.
    * **Monotonic Increments:** Normal delta calculation when `current >= previous`.
    * **Counter Reset:** `current < previous` safely resets baseline and emits zero delta without underflow.
    * **Interface Lifecycle:** Missing interfaces are pruned; reappearing interfaces establish a new baseline.
+   * **On-Demand Query Isolation:** Handling `state.get` queries between periodic samples computes transient deltas without advancing or mutating the periodic baseline; the subsequent scheduled periodic sample measures the full interval.
    * **Reconnect Gaps:** Variable interval timing preserves accurate delta rates.
+
+#### 23.2.5 Dynamic Interval Propagation & Cloud Lifecycle Control (`metrics.statistics.interval`)
+
+To eliminate dual-timer desynchronization and ensure Cloud configuration changes take effect immediately:
+
+1. **Hardcoded Default with Cloud Override:**
+   * **Default Value:** The collector initializes with a hardcoded default reporting interval of 60 seconds (or 30 seconds), configured via `agent.state.interval: 60s`. This default applies on initial boot and whenever no Cloud interval is configured.
+   * **Cloud Configuration Override:** When a configuration is pushed from the Cloud controller containing `metrics.statistics.interval`, that pushed value dynamically overrides the hardcoded default.
+   * **Omission Fallback:** If the pushed Cloud configuration omits `metrics.statistics.interval`, the collector maintains or falls back to the hardcoded default (60s).
+2. **Propagation via JetStream KV (`desired.<target>`):**
+   * When Cloud Gateway pushes a configuration update, `ucentral-client` writes the desired configuration to JetStream KV (`desired.<target>`) and publishes a trigger to `cmd.configure.<target>`.
+   * The VyOS agent configuration pipeline inspects the `metrics.statistics` section of the desired configuration:
+     * **Dynamic Ticker Reconfiguration:** If `metrics.statistics.interval >= 60`, the state collector's background ticker is dynamically adjusted (`ticker.Reset(time.Duration(interval) * time.Second)`), overriding the hardcoded default.
+     * **Disabling Periodic State:** If `metrics.statistics` is explicitly disabled or `interval == 0`, the agent suspends its periodic state collector ticker, halting periodic publishing on `state.<target>`.
+3. **On-Demand Live Queries Unaffected:** Disabling periodic state publishing does NOT disable the request-reply handler on `state.get.<target>`. The agent continues to respond to on-demand live state queries at all times.
+4. **Rollback Resilience:** If a configuration transaction fails and is rolled back, the collector restores its sampling interval to the value from the last successfully applied configuration (or falls back to the hardcoded default).
 
 #### Published State Wire Schema (`agentcore.StateEnvelope`)
 
