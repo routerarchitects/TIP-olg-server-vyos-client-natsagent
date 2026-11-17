@@ -146,6 +146,7 @@ agent:
   state:
     enabled: true
     interval: 60s # Initial boot/fallback default. Authoritatively overridden by Cloud metrics.statistics.interval
+    max_concurrent_requests: 5 # Configurable worker capacity for on-demand state.get queries (default: 5)
 ```
 
 ## 9. Agentcore config section
@@ -805,6 +806,33 @@ To eliminate dual-timer desynchronization and ensure Cloud configuration changes
      * **Disabling Periodic State:** If `metrics.statistics` is explicitly disabled or `interval == 0`, the agent suspends its periodic state collector ticker, halting periodic publishing on `state.<target>`.
 3. **On-Demand Live Queries Unaffected:** Disabling periodic state publishing does NOT disable the request-reply handler on `state.get.<target>`. The agent continues to respond to on-demand live state queries at all times.
 4. **Rollback Resilience:** If a configuration transaction fails and is rolled back, the collector restores its sampling interval to the value from the last successfully applied configuration (or falls back to the hardcoded default).
+
+#### 23.2.6 On-Demand Collection Concurrency & Execution Boundary (`state.get.<target>`)
+
+To protect the router from overload and prevent starvation of configuration and action commands:
+
+1. **Configurable Execution Capacity:**
+   * Configured via `agent.state.max_concurrent_requests` (default: `5`) and supplied during `agentcore` initialization (`Config.StateGetWorkers = 5`).
+   * The VyOS agent alone owns this execution capacity and concurrency limit. The uCentral Client does not duplicate or mirror this setting.
+2. **Immediate Rejection on Saturation (No Waiting Queue):**
+   * If all 5 worker slots are actively executing state collections when a new query arrives on `state.get.<target>`, the agent must NOT queue or buffer the request.
+   * The agent immediately returns a typed, correlated `service_busy` error reply to the NATS reply inbox (`Result: failure`, `ErrorCode: 2`, `Message: "service busy: maximum concurrent state requests reached"`). It never remains silent or forces callers to wait for a timeout.
+3. **Execution Bounding (3-Second Deadline):**
+   * Each admitted collection is bounded to a strict 3-second context cancellation (`context.WithTimeout(ctx, 3*time.Second)`).
+   * This ensures execution terminates cleanly well within the uCentral Client's 5-second overall NATS deadline (`OLG_TIMEOUT_DISPATCH`).
+4. **Nonblocking NATS Subscription Callback:**
+   * The NATS subscription callback for `state.get.<target>` performs only initial validation and instantaneous capacity admission (acquiring a semaphore slot).
+   * Once admitted, collection is immediately handed off to an asynchronous worker goroutine.
+   * The callback must NEVER run the 3-second collection inline on the NATS subscription dispatcher thread. This guarantees that configure (`cmd.configure.<target>`) and action (`cmd.action.<target>.*`) subscriptions are never blocked or starved by on-demand state requests.
+5. **Read-Only Baseline Isolation:**
+   * On-demand collection is strictly read-only with respect to `periodic_counters`. It computes transient deltas for the response, but never mutates the periodic baseline or its timestamp.
+6. **Capacity Release & Observability:**
+   * Worker capacity is strictly released on every exit path (`defer sem.Release()`): success, kernel read error, 3-second timeout, or panic recovery.
+   * Observability metrics: Expose active state workers gauge (`state_get_active_workers`), busy rejections (`state_get_busy_total`), and timeouts (`state_get_timeout_total`).
+7. **Required Test Matrix:**
+   * Concurrency saturation: 5 active collections saturated; the 6th simultaneous request receives an immediate `service_busy` reply.
+   * Worker slot release verified across all terminal conditions (successful reply, kernel read error, 3-second timeout expiration, and panic recovery).
+   * Starvation immunity: During 5 active concurrent state collections, concurrent `configure` or `action` commands are dispatched and executed immediately without delay.
 
 #### Published State Wire Schema (`agentcore.StateEnvelope`)
 
