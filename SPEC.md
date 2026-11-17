@@ -750,15 +750,21 @@ The collector applies the following rules when processing neighbors:
 3. **Bridge and VLAN Interface Attribution:**
    * For bridge interfaces (e.g., `br0`), `ip -j neigh` attributes the neighbor to the bridge master device. Where bridge forwarding table lookup (`bridge -j fdb show`) resolves the MAC to a physical bridge port (e.g., `eth1`), `ports: ["eth1"]` is populated; otherwise, the interface name itself is used (`ports: ["br0"]`).
    * For 802.1Q VLAN interfaces (e.g., `eth1.100`), the client is attributed to the specific VLAN subinterface under which the neighbor was resolved.
-4. **`last_seen` Semantics:**
-   * For `REACHABLE` neighbors: `last_seen` is set to current epoch seconds (or `0` to denote active confirmation).
-   * For `STALE` or `DELAY` neighbors: `last_seen` reflects the timestamp of the last confirmed L3 activity before transitioning to stale.
+4. **`last_seen` Semantics (Elapsed Seconds, Never Unix Epoch):**
+   * The OpenWiFi state schema defines `last_seen` as elapsed duration ("How long ago was traffic from this neighbour last seen."), mirroring AP firmware implementations (e.g., `now_monotonic - mac.ts` in seconds from `udevmand/src/mac.c`). It MUST represent elapsed seconds since last reliably observed activity at state collection time, and MUST NEVER be populated with a Unix epoch timestamp.
+   * **Use `0` Only for Verified Fresh Activity:** Use `0` only if fresh activity is actually known (e.g. traffic reliably observed during the current sampling second), NOT merely because an ARP/NDP entry is marked `REACHABLE`.
+   * **Omission when Age is Unmeasurable:** Kernel `ip -j neigh` state alone is not a last-packet timestamp. If activity age is not measurable or known, the collector MUST omit this optional field (`omitempty`) instead of inventing a timestamp or speculative age. No new MAC tracking subsystem is needed in v1.
+   * **Schema-Valid Omission:** In `TIP-olg-ucentral-schema` (`ucentral.state.pretty.json`), `last_seen` is an optional property of `#/$defs/interface.client`. Omitting the field produces valid JSON schema output.
 5. **Reconciliation for Authoritative Connected Clients:**
    * When an authoritative connected-device inventory is required by the Gateway/UI, the collector reconciles multiple sources:
      * **L2 Physical Link Presence:** Learned dynamic MACs from `bridge -j fdb show` and Wi-Fi station dumps (`nl80211`/`iw`).
      * **L3 Address Assignment:** Active DHCP lease files (e.g., Kea/ISC DHCP leases).
      * **L3 Activity:** Filtered ARP/NDP cache (`ip -j neigh`).
    * Merging these sources produces a unified inventory containing client hostnames, lease expiration, verified L2 port presence, and L3 activity timestamps.
+6. **Required Test Matrix (`interfaces.clients` & `last_seen`):**
+   * `TestNeighbor_KnownAge`: Neighbor with measurable traffic activity includes `last_seen` as elapsed seconds ($\ge 0$).
+   * `TestNeighbor_UnknownAge_Omitted`: Neighbor sourced from ARP/NDP cache where last-packet age is not measurable omits `last_seen` entirely (`omitempty`), ensuring no fabricated age or epoch timestamp is published.
+   * `TestNeighbor_SchemaValidation_Omission`: Validates that serializing `interfaces.clients` without `last_seen` passes OpenWiFi state schema validation.
 
 #### 23.2.3 Applied Configuration UUID Checkpoint & Concurrency Semantics
 
@@ -795,17 +801,30 @@ To mirror OpenWiFi AP behavior and prevent counter corruption or graph spikes, t
 
 To eliminate dual-timer desynchronization and ensure Cloud configuration changes take effect immediately:
 
-1. **Hardcoded Default with Cloud Override:**
-   * **Default Value:** The collector initializes with a hardcoded default reporting interval of 60 seconds (or 30 seconds), configured via `agent.state.interval: 60s`. This default applies on initial boot and whenever no Cloud interval is configured.
-   * **Cloud Configuration Override:** When a configuration is pushed from the Cloud controller containing `metrics.statistics.interval`, that pushed value dynamically overrides the hardcoded default.
-   * **Omission Fallback:** If the pushed Cloud configuration omits `metrics.statistics.interval`, the collector maintains or falls back to the hardcoded default (60s).
-2. **Propagation via JetStream KV (`desired.<target>`):**
-   * When Cloud Gateway pushes a configuration update, `ucentral-client` writes the desired configuration to JetStream KV (`desired.<target>`) and publishes a trigger to `cmd.configure.<target>`.
-   * The VyOS agent configuration pipeline inspects the `metrics.statistics` section of the desired configuration:
-     * **Dynamic Ticker Reconfiguration:** If `metrics.statistics.interval >= 60`, the state collector's background ticker is dynamically adjusted (`ticker.Reset(time.Duration(interval) * time.Second)`), overriding the hardcoded default.
-     * **Disabling Periodic State:** If `metrics.statistics` is explicitly disabled or `interval == 0`, the agent suspends its periodic state collector ticker, halting periodic publishing on `state.<target>`.
-3. **On-Demand Live Queries Unaffected:** Disabling periodic state publishing does NOT disable the request-reply handler on `state.get.<target>`. The agent continues to respond to on-demand live state queries at all times.
-4. **Rollback Resilience:** If a configuration transaction fails and is rolled back, the collector restores its sampling interval to the value from the last successfully applied configuration (or falls back to the hardcoded default).
+1. **Authoritative Cloud Source of Truth with Local Fallback:**
+   * **Source of Truth:** The VyOS agent treats the last successfully applied Cloud configuration's `metrics.statistics.interval` as the authoritative source of truth for its periodic telemetry sampling frequency.
+   * **Local Startup & Omission Fallback:** The collector initializes with a local configuration default of 60 seconds, configured via `agent.state.interval: 60s` (default: 60s). This fallback applies on initial cold boot (before any Cloud configuration has been applied) and whenever an applied Cloud configuration omits `metrics.statistics.interval`.
+2. **Schema Validation & Forwarding Boundary:**
+   * Ingress configurations are validated by the uCentral client against `TIP-olg-ucentral-schema` (`ucentral.schema.pretty.json`). Because the schema strictly enforces an integer `minimum: 60` for `metrics.statistics.interval`, any Cloud configuration containing `interval < 60` (including `interval: 0` or negative values) fails schema validation at ingress and is rejected.
+   * Only schema-validated desired configurations are forwarded to JetStream KV (`desired.<target>`). Payloads with invalid intervals are never written to KV.
+3. **Dynamic Ticker Adjustment on Apply:**
+   * When a validated configuration containing `metrics.statistics.interval >= 60` is successfully committed and applied, the state collector's background ticker is dynamically adjusted (`ticker.Reset(time.Duration(interval) * time.Second)`), overriding any previous interval.
+4. **Periodic State Disablement Status (Future Extension):**
+   * The OpenWiFi configuration schema currently enforces `minimum: 60` and does not define a schema-valid disablement mechanism (such as an explicit boolean flag). Pushing `interval: 0` is schema-invalid and rejected at ingress.
+   * Turning off periodic telemetry from the Cloud is therefore not supported under the current schema and is designated as a future extension pending an approved schema amendment.
+   * The agent publishes periodic telemetry continuously at the applied interval ($\ge 60$s) or 60s fallback.
+5. **On-Demand Live Queries Independent (`state.get.<target>`):**
+   * On-demand live state queries (`state.get.<target>`) operate completely independently of periodic state publishing and periodic intervals.
+   * Live queries execute via the dedicated worker pool (5 workers, 3s timeout) without mutating the periodic delta baseline or being constrained by periodic ticker frequency.
+6. **Rollback Resilience:**
+   * If a configuration transaction fails rendering or application and triggers a rollback (`Result: rolled_back`), the collector preserves or restores the sampling interval from the last successfully applied configuration (or falls back to the local 60s default).
+7. **Required Test Matrix:**
+   * `TestInterval_ValidMinimum`: Validates that a Cloud configuration with `metrics.statistics.interval: 60` adjusts the collection ticker to 60s.
+   * `TestInterval_ValidCustom`: Validates that a Cloud configuration with `metrics.statistics.interval: 120` adjusts the collection ticker to 120s.
+   * `TestInterval_MissingOmissionFallback`: Validates that a Cloud configuration omitting `metrics.statistics.interval` causes the collector to maintain the last-applied interval or fall back to the local 60s default.
+   * `TestInterval_RejectedZero`: Validates that a desired configuration with `metrics.statistics.interval: 0` or `< 60` fails uCentral client schema validation, is rejected before JetStream KV write, and leaves the VyOS agent's active interval unchanged.
+   * `TestInterval_RollbackPreservation`: Validates that a failed configuration transaction rolling back preserves the sampling interval from the previously applied configuration.
+   * `TestInterval_OnDemandIndependence`: Validates that on-demand queries on `state.get.<target>` execute and return live telemetry independently of periodic interval settings.
 
 #### 23.2.6 On-Demand Collection Concurrency & Execution Boundary (`state.get.<target>`)
 
@@ -816,10 +835,23 @@ To protect the router from overload and prevent starvation of configuration and 
    * The VyOS agent alone owns this execution capacity and concurrency limit. The uCentral Client does not duplicate or mirror this setting.
 2. **Immediate Rejection on Saturation (No Waiting Queue):**
    * If all 5 worker slots are actively executing state collections when a new query arrives on `state.get.<target>`, the agent must NOT queue or buffer the request.
-   * The agent immediately returns a typed, correlated `service_busy` error reply to the NATS reply inbox (`Result: failure`, `ErrorCode: 2`, `Message: "service busy: maximum concurrent state requests reached"`). It never remains silent or forces callers to wait for a timeout.
+   * The agent immediately returns a typed, serialized `agentcore.StateGetReply` error response to the ephemeral NATS reply inbox (`msg.Reply`):
+     ```json
+     {
+       "version": "1.0",
+       "target": "vyos",
+       "error": {
+         "code": "service_busy",
+         "message": "All state collection workers are occupied"
+       }
+     }
+     ```
+   * **Subject & Correlation Invariants:** The reply is sent strictly to the NATS ephemeral reply inbox (`msg.Reply`). It is NEVER published to `result.<target>` or `status.<target>`. The native NATS reply inbox handles correlation with the requester's `RequestState()` call; no duplicate RPC ID is required.
+   * **NATS Wire vs. Cloud Gateway Code Distinction:** The NATS wire protocol uses the string error code `"service_busy"`. Note that the numeric code `2` (`result.status: {"error": 2, "text": "service busy: maximum concurrent state requests reached"}`) is the **Cloud Gateway REST RPC response mapping** applied upstream by the uCentral Client, NOT the NATS wire error code.
 3. **Execution Bounding (3-Second Deadline):**
    * Each admitted collection is bounded to a strict 3-second context cancellation (`context.WithTimeout(ctx, 3*time.Second)`).
    * This ensures execution terminates cleanly well within the uCentral Client's 5-second overall NATS deadline (`OLG_TIMEOUT_DISPATCH`).
+   * If collection exceeds 3 seconds, the agent returns `StateGetReply` with `error.code: "collection_timeout"`.
 4. **Nonblocking NATS Subscription Callback:**
    * The NATS subscription callback for `state.get.<target>` performs only initial validation and instantaneous capacity admission (acquiring a semaphore slot).
    * Once admitted, collection is immediately handed off to an asynchronous worker goroutine.
@@ -830,9 +862,44 @@ To protect the router from overload and prevent starvation of configuration and 
    * Worker capacity is strictly released on every exit path (`defer sem.Release()`): success, kernel read error, 3-second timeout, or panic recovery.
    * Observability metrics: Expose active state workers gauge (`state_get_active_workers`), busy rejections (`state_get_busy_total`), and timeouts (`state_get_timeout_total`).
 7. **Required Test Matrix:**
-   * Concurrency saturation: 5 active collections saturated; the 6th simultaneous request receives an immediate `service_busy` reply.
+   * Concurrency saturation: 5 active collections saturated; the 6th simultaneous request receives an immediate `StateGetReply` with `error.code: "service_busy"` on its NATS reply inbox.
+   * Successful reply: Returns `StateGetReply` wrapping valid `StateEnvelope` on ephemeral reply inbox.
+   * Collection timeout: Collection taking > 3s aborts and returns `StateGetReply` with `error.code: "collection_timeout"`.
+   * Collection error: Internal kernel read failure returns `StateGetReply` with `error.code: "collection_failed"`.
    * Worker slot release verified across all terminal conditions (successful reply, kernel read error, 3-second timeout expiration, and panic recovery).
    * Starvation immunity: During 5 active concurrent state collections, concurrent `configure` or `action` commands are dispatched and executed immediately without delay.
+
+#### 23.2.7 Applied Topology Port Mapping & Role Derivation (`link-state` & `lldp-peers`)
+
+To accurately classify interfaces into WAN (`upstream`) and LAN (`downstream`) without relying on interface name heuristics, routing table queries, or LLDP neighbor types, the state collector derives its topology mapping strictly from the **last successfully applied configuration** and the renderer's resolved port map:
+
+1. **Reusing Applied Configuration Roles & Renderer Port Map:**
+   * OpenWiFi desired configuration defines interface roles (`interfaces[].role: "upstream"` or `"downstream"`) and port selectors (`interfaces[].ethernet[].select-ports[]`, e.g. `["WAN*"]`, `["LAN1"]`, `["LAN2"]`).
+   * The renderer adapter (`olg-renderer-vyos`) resolves these selectors to physical Linux interfaces using its port map (`WithPortMap`, defaulting to `WAN*` $\rightarrow$ `eth0`, `LAN1` $\rightarrow$ `eth1`, `LAN2` $\rightarrow$ `eth2`, or configured platform override maps).
+   * The VyOS state collector derives its physical interface $\leftrightarrow$ role mapping directly from this resolved state of the **last successfully applied configuration**:
+     * A physical interface mapped to an interface definition with `role: "upstream"` is classified under `upstream`.
+     * A physical interface mapped to an interface definition with `role: "downstream"` is classified under `downstream`.
+   * **Strict Source of Truth:** The collector MUST NOT classify WAN/LAN by interface names (e.g. assuming `eth0` is always WAN), kernel routing table entries (`ip route show default`), or LLDP neighbor capabilities.
+   * **Failed / Unapplied Config Isolation:** The collector MUST NEVER treat a pending, unapplied, or failed desired configuration as authoritative. If a configuration attempt fails and rolls back, the collector preserves or restores the port mapping from the last-known-good applied configuration. On fresh boot before any Cloud configuration is applied, the collector falls back to the default port map (`WAN*` $\rightarrow$ `eth0` as upstream, `LAN1` $\rightarrow$ `eth1` as downstream).
+
+2. **Physical Ports vs. Logical Interfaces in Telemetry:**
+   * **`link-state` (Physical Ports Only):** Physical ports resolved by the applied port mapping are populated with carrier state, negotiated speed (Mbps), and duplex mode under their assigned role (`link-state.upstream.<iface>` or `link-state.downstream.<iface>`).
+   * **`lldp-peers` (Local Port Attribution):** Discovered LLDP neighbors are attached to the local receiving physical interface under the same role assigned to that physical interface (`lldp-peers.upstream.<iface>` or `lldp-peers.downstream.<iface>`). Each interface entry contains an array of neighbor peer objects (or `[]` if no peers are heard). Empty LLDP tables (`"upstream": {}`, `"downstream": {}`) are valid.
+   * **Bounded Execution:** Sampling LLDP peers via `lldpcli` (e.g., `lldpcli -f json show neighbors`) is executed with a strict bounded timeout (2 seconds) and capped output parsing to prevent hanging or memory exhaustion.
+   * **Logical Bridges & VLANs:** Logical interfaces, bridge master devices (`br0`), and 802.1Q subinterfaces (`eth1.100`) remain strictly in the root `interfaces[]` list; they are NOT placed in `link-state` or `lldp-peers`.
+
+3. **OpenWiFi State Schema Validation & Diagnostic Omission:**
+   * Serialized interface keys under `link-state.upstream`, `link-state.downstream`, `lldp-peers.upstream`, and `lldp-peers.downstream` must strictly match the OpenWiFi state schema regex `^(eth|lan|wan)[0-9]*$`.
+   * **Omission Policy:** For unknown, unclassified, shared/trunk, or unsupported interface names (including bridge devices, VLAN subinterfaces, loopback, or tunnel interfaces), the collector MUST **omit** them from `link-state` and `lldp-peers` rather than guessing a role, and log a diagnostic warning.
+   * **Wired-Only Router Profile:** Purely wired appliances without wireless PHYs report `"radios": []` (empty array, never null) so Cloud Gateway associations calculations complete safely.
+
+4. **Required Test Matrix:**
+   * `TestPortMap_Override`: Verifies that custom port maps configured via `WithPortMap` (e.g., `WAN*` $\rightarrow$ `eth3`) resolve physical ports to their configured WAN/LAN roles correctly.
+   * `TestPortMap_AppliedConfigChange`: Verifies that committing a new configuration with updated interface roles updates the state collector's topology mapping dynamically.
+   * `TestPortMap_RollbackPreservation`: Verifies that a failed configuration transaction rolling back preserves the port mapping from the previously applied configuration.
+   * `TestState_WiredOnlyRouter`: Verifies that state collection on a wired-only appliance emits `"radios": []` without panic or schema error.
+   * `TestLLDP_PortAttribution`: Verifies that LLDP neighbors are attributed to the local receiving physical port under that port's assigned WAN/LAN role.
+   * `TestSchemaValidation_PortKeys`: Verifies that all keys in `link-state` and `lldp-peers` strictly match `^(eth|lan|wan)[0-9]*$`, and that non-matching logical/subinterfaces are safely omitted with diagnostic logging.
 
 #### Published State Wire Schema (`agentcore.StateEnvelope`)
 
