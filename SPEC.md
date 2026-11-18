@@ -821,7 +821,7 @@ To eliminate dual-timer desynchronization and ensure Cloud configuration changes
 7. **Required Test Matrix:**
    * `TestInterval_ValidMinimum`: Validates that a Cloud configuration with `metrics.statistics.interval: 60` adjusts the collection ticker to 60s.
    * `TestInterval_ValidCustom`: Validates that a Cloud configuration with `metrics.statistics.interval: 120` adjusts the collection ticker to 120s.
-   * `TestInterval_MissingOmissionFallback`: Validates that a Cloud configuration omitting `metrics.statistics.interval` causes the collector to maintain the last-applied interval or fall back to the local 60s default.
+   * `TestInterval_MissingOmissionFallback`: Validates that a successfully applied Cloud configuration omitting `metrics.statistics.interval` causes the collector to fall back to the local 60s default (declarative baseline).
    * `TestInterval_RejectedZero`: Validates that a desired configuration with `metrics.statistics.interval: 0` or `< 60` fails uCentral client schema validation, is rejected before JetStream KV write, and leaves the VyOS agent's active interval unchanged.
    * `TestInterval_RollbackPreservation`: Validates that a failed configuration transaction rolling back preserves the sampling interval from the previously applied configuration.
    * `TestInterval_OnDemandIndependence`: Validates that on-demand queries on `state.get.<target>` execute and return live telemetry independently of periodic interval settings.
@@ -871,35 +871,72 @@ To protect the router from overload and prevent starvation of configuration and 
 
 #### 23.2.7 Applied Topology Port Mapping & Role Derivation (`link-state` & `lldp-peers`)
 
-To accurately classify interfaces into WAN (`upstream`) and LAN (`downstream`) without relying on interface name heuristics, routing table queries, or LLDP neighbor types, the state collector derives its topology mapping strictly from the **last successfully applied configuration** and the renderer's resolved port map:
+To accurately classify physical interfaces into WAN (`upstream`) and LAN (`downstream`) without relying on interface name heuristics, routing table queries, or LLDP neighbor types, the state collector derives its topology mapping strictly through an **explicit applied-port-role handoff pipeline** from the renderer through the configure service into persistent checkpoint storage:
 
-1. **Reusing Applied Configuration Roles & Renderer Port Map:**
-   * OpenWiFi desired configuration defines interface roles (`interfaces[].role: "upstream"` or `"downstream"`) and port selectors (`interfaces[].ethernet[].select-ports[]`, e.g. `["WAN*"]`, `["LAN1"]`, `["LAN2"]`).
-   * The renderer adapter (`olg-renderer-vyos`) resolves these selectors to physical Linux interfaces using its port map (`WithPortMap`, defaulting to `WAN*` $\rightarrow$ `eth0`, `LAN1` $\rightarrow$ `eth1`, `LAN2` $\rightarrow$ `eth2`, or configured platform override maps).
-   * The VyOS state collector derives its physical interface $\leftrightarrow$ role mapping directly from this resolved state of the **last successfully applied configuration**:
-     * A physical interface mapped to an interface definition with `role: "upstream"` is classified under `upstream`.
-     * A physical interface mapped to an interface definition with `role: "downstream"` is classified under `downstream`.
-   * **Strict Source of Truth:** The collector MUST NOT classify WAN/LAN by interface names (e.g. assuming `eth0` is always WAN), kernel routing table entries (`ip route show default`), or LLDP neighbor capabilities.
-   * **Failed / Unapplied Config Isolation:** The collector MUST NEVER treat a pending, unapplied, or failed desired configuration as authoritative. If a configuration attempt fails and rolls back, the collector preserves or restores the port mapping from the last-known-good applied configuration. On fresh boot before any Cloud configuration is applied, the collector falls back to the default port map (`WAN*` $\rightarrow$ `eth0` as upstream, `LAN1` $\rightarrow$ `eth1` as downstream).
+1. **Renderer Output Extension (`PhysicalPortRoles`):**
+   * The renderer (`olg-renderer-vyos`) resolves port selectors (`interfaces[].ethernet[].select-ports[]`, e.g. `["WAN*"]`, `["LAN1"]`) to physical Linux interfaces using its port map (`WithPortMap`, defaulting to `WAN*` $\rightarrow$ `eth0`, `LAN1` $\rightarrow$ `eth1`, `LAN2` $\rightarrow$ `eth2`, or platform-specific overrides).
+   * During normalization, the renderer correlates each physical interface with its interface definition's `role` (`"upstream"` or `"downstream"`).
+   * `olg-renderer-vyos/renderer.Output` is extended with:
+     ```go
+     PhysicalPortRoles map[string]string // e.g. {"eth0": "upstream", "eth1": "downstream"}
+     ```
+   * The VyOS renderer adapter (`internal/renderervyos/adapter.go`) passes this mapping through via `internal/renderer.Output.PhysicalPortRoles` directly into `configure.Service`. The telemetry collector does NOT independently classify ports or duplicate selector resolution.
 
-2. **Physical Ports vs. Logical Interfaces in Telemetry:**
+2. **Candidate Lifecycle & Atomic Checkpoint Persistence (`state.json`):**
+   * **Candidate Status:** During rendering and execution, `PhysicalPortRoles` is treated as a *candidate* mapping. It is NOT authoritative until `applyEngine.Apply()` succeeds.
+   * **Atomic State Checkpoint:** Upon successful apply, the configure service saves `AppliedUUID`, `AppliedAt`, and `PhysicalPortRoles` together into the existing `state.State` struct:
+     ```go
+     type State struct {
+         Target            string            `json:"target"`
+         AppliedUUID       string            `json:"applied_uuid"`
+         AppliedAt         time.Time         `json:"applied_at"`
+         PhysicalPortRoles map[string]string `json:"physical_port_roles,omitempty"`
+     }
+     ```
+   * Saved atomically to `/tmp/vyos-nats-agent/state.json` via the existing `FileStore.Save()` path.
+   * **Consistent Snapshot Read:** The background state collector reads `AppliedUUID` and `PhysicalPortRoles` together from this same consistent checkpoint file. This guarantees that published `link-state` roles match the exact configuration identified by `AppliedUUID` without read-write tearing or race conditions.
+
+3. **Rollback Resilience & Topology Degradation:**
+   * **Confirmed Rollback:** If a configuration attempt fails rendering or apply and confirmed rollback succeeds (`Result: rolled_back`), the agent retains the previous applied `PhysicalPortRoles` and `AppliedUUID`.
+   * **Degraded Topology State:** If the actual running configuration may have changed and rollback fails, or if writing the checkpoint to `/tmp` fails, the running state is indeterminate. The agent flags the topology as **degraded** (omits unverified port roles from `link-state` and logs an observable diagnostic) rather than presenting stale or unverified roles as authoritative truth.
+
+4. **Lifecycle Semantics (Process Restart, VM Reboot, Legacy Checkpoint):**
+   * **Agent Process Restart:** On agent process restart (crash or service restart), the agent reloads `/tmp/vyos-nats-agent/state.json` on startup and immediately restores the verified applied port roles without reapplying.
+   * **VM Reboot:** On VM reboot, `/tmp` is wiped clean (`tmpfs`). The agent intentionally starts with no applied state. Normal JetStream `desired.<target>` reconciliation triggers, fetches the desired configuration, reapplies it, and rebuilds the checkpoint and port roles from scratch.
+   * **First Boot Cold State:** The agent MUST NOT declare or assume a default WAN/LAN mapping as applied on first boot before reconciliation has run. Until a verified applied configuration exists, physical ports remain unclassified and are omitted from `link-state` role sub-trees with an observable diagnostic log.
+   * **Legacy Checkpoint Upgrade:** If an older checkpoint exists with a matching `AppliedUUID` but lacks `physical_port_roles`, the agent regenerates the mapping by running renderer normalization against the verified desired configuration without re-running VyOS CLI set commands. If desired config is missing or unverified, unknown classifications are safely omitted.
+
+5. **Strict Anti-Guessing Guardrails:**
+   * The collector MUST NOT classify WAN/LAN from:
+     * Unapplied, pending, or failed desired configurations.
+     * Guessed interface naming conventions (e.g., assuming `eth0` is WAN).
+     * Kernel routing table entries (e.g., `ip route show default`).
+     * LLDP neighbor chassis or port capability types.
+   * **Omission Policy:** Until a verified applied mapping exists, or for interfaces that are unknown, unmapped, shared/trunk, or unsupported (including bridges, VLAN subinterfaces, and tunnels), the collector MUST **omit** them from `link-state.upstream` and `link-state.downstream`, emitting an observable diagnostic log.
+
+6. **Physical Ports vs. Logical Interfaces in Telemetry:**
    * **`link-state` (Physical Ports Only):** Physical ports resolved by the applied port mapping are populated with carrier state, negotiated speed (Mbps), and duplex mode under their assigned role (`link-state.upstream.<iface>` or `link-state.downstream.<iface>`).
-   * **`lldp-peers` (Local Port Attribution):** Discovered LLDP neighbors are attached to the local receiving physical interface under the same role assigned to that physical interface (`lldp-peers.upstream.<iface>` or `lldp-peers.downstream.<iface>`). Each interface entry contains an array of neighbor peer objects (or `[]` if no peers are heard). Empty LLDP tables (`"upstream": {}`, `"downstream": {}`) are valid.
-   * **Bounded Execution:** Sampling LLDP peers via `lldpcli` (e.g., `lldpcli -f json show neighbors`) is executed with a strict bounded timeout (2 seconds) and capped output parsing to prevent hanging or memory exhaustion.
+   * **`lldp-peers` (Local Port Attribution):** Discovered LLDP neighbors are attached to the local receiving physical interface under the same role assigned to that physical interface (`lldp-peers.upstream.<iface>` or `lldp-peers.downstream.<iface>`). Empty LLDP tables (`"upstream": {}`, `"downstream": {}`) are valid.
+   * **Bounded Execution:** Sampling LLDP peers via `lldpcli` (e.g., `lldpcli -f json show neighbors`) is executed with a strict bounded timeout (2 seconds) and capped output parsing.
    * **Logical Bridges & VLANs:** Logical interfaces, bridge master devices (`br0`), and 802.1Q subinterfaces (`eth1.100`) remain strictly in the root `interfaces[]` list; they are NOT placed in `link-state` or `lldp-peers`.
-
-3. **OpenWiFi State Schema Validation & Diagnostic Omission:**
-   * Serialized interface keys under `link-state.upstream`, `link-state.downstream`, `lldp-peers.upstream`, and `lldp-peers.downstream` must strictly match the OpenWiFi state schema regex `^(eth|lan|wan)[0-9]*$`.
-   * **Omission Policy:** For unknown, unclassified, shared/trunk, or unsupported interface names (including bridge devices, VLAN subinterfaces, loopback, or tunnel interfaces), the collector MUST **omit** them from `link-state` and `lldp-peers` rather than guessing a role, and log a diagnostic warning.
    * **Wired-Only Router Profile:** Purely wired appliances without wireless PHYs report `"radios": []` (empty array, never null) so Cloud Gateway associations calculations complete safely.
+   * **Schema Validation:** Serialized interface keys under `link-state` and `lldp-peers` must strictly match `^(eth|lan|wan)[0-9]*$`.
 
-4. **Required Test Matrix:**
-   * `TestPortMap_Override`: Verifies that custom port maps configured via `WithPortMap` (e.g., `WAN*` $\rightarrow$ `eth3`) resolve physical ports to their configured WAN/LAN roles correctly.
-   * `TestPortMap_AppliedConfigChange`: Verifies that committing a new configuration with updated interface roles updates the state collector's topology mapping dynamically.
-   * `TestPortMap_RollbackPreservation`: Verifies that a failed configuration transaction rolling back preserves the port mapping from the previously applied configuration.
-   * `TestState_WiredOnlyRouter`: Verifies that state collection on a wired-only appliance emits `"radios": []` without panic or schema error.
-   * `TestLLDP_PortAttribution`: Verifies that LLDP neighbors are attributed to the local receiving physical port under that port's assigned WAN/LAN role.
-   * `TestSchemaValidation_PortKeys`: Verifies that all keys in `link-state` and `lldp-peers` strictly match `^(eth|lan|wan)[0-9]*$`, and that non-matching logical/subinterfaces are safely omitted with diagnostic logging.
+7. **Required Acceptance Test Matrix:**
+   * `TestPortMap_DefaultResolution`: Validates that default `WithPortMap` resolves selectors (`WAN*` $\rightarrow$ `eth0`, `LAN1` $\rightarrow$ `eth1`, `LAN2` $\rightarrow$ `eth2`) to `PhysicalPortRoles: {"eth0": "upstream", "eth1": "downstream", "eth2": "downstream"}` in renderer output.
+   * `TestPortMap_CustomOverride`: Validates that platform overrides passed via `WithPortMap` (e.g., `WAN*` $\rightarrow$ `eth3`) produce corresponding `PhysicalPortRoles` in renderer output.
+   * `TestPortMap_ApplySuccess_Checkpoint`: Validates that on successful `Apply()`, `configure.Service` writes `AppliedUUID`, `AppliedAt`, and `PhysicalPortRoles` together to `/tmp/vyos-nats-agent/state.json`.
+   * `TestPortMap_RoleChange`: Validates that applying a configuration change that swaps port roles updates `PhysicalPortRoles` in the checkpoint and updates collector output dynamically.
+   * `TestPortMap_FailedApply_RollbackPreservation`: Validates that a failed configuration transaction with confirmed rollback retains the previously applied `AppliedUUID` and `PhysicalPortRoles`.
+   * `TestPortMap_CheckpointSaveFailure_Degraded`: Validates that failure to write `/tmp/vyos-nats-agent/state.json` flags topology as degraded, omitting unverified roles and logging a diagnostic.
+   * `TestPortMap_ConcurrentReadConsistency`: Validates atomic snapshot consistency when collector reads `state.json` concurrently with configure service writes.
+   * `TestPortMap_ProcessRestart_Reload`: Validates that agent process restart reloads `PhysicalPortRoles` from `/tmp/vyos-nats-agent/state.json` without reapplying VyOS commands.
+   * `TestPortMap_VMReboot_Reconcile`: Validates that VM reboot w/ empty `/tmp` omits unclassified ports on first boot until JetStream reconciliation reapplies desired config and rebuilds the checkpoint.
+   * `TestPortMap_LegacyCheckpointUpgrade`: Validates that loading a legacy checkpoint (matching UUID but missing `physical_port_roles`) regenerates port roles from verified desired config without re-running VyOS CLI apply.
+   * `TestPortMap_UnknownPortOmission`: Validates that unclassified or trunk ports are safely omitted from `link-state` and `lldp-peers` with an observable diagnostic log.
+   * `TestLLDP_PortAttribution`: Validates that LLDP neighbors are attributed to the local receiving physical interface under that port's assigned WAN/LAN role.
+   * `TestState_WiredOnlyRouter`: Validates that state collection on a wired appliance emits `"radios": []` without panic or schema error.
+   * `TestSchemaValidation_PortKeys`: Validates that all keys in `link-state` and `lldp-peers` strictly match `^(eth|lan|wan)[0-9]*$`.
 
 #### Published State Wire Schema (`agentcore.StateEnvelope`)
 
