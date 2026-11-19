@@ -142,6 +142,11 @@ agent:
   actions:
     enabled:
       - trace
+
+  state:
+    enabled: true
+    interval: 60s # Initial boot/fallback default. Authoritatively overridden by Cloud metrics.statistics.interval
+    max_concurrent_requests: 5 # Configurable worker capacity for on-demand state.get queries (default: 5)
 ```
 
 ## 9. Agentcore config section
@@ -657,7 +662,9 @@ Action success:
 }
 ```
 
-## 23. Status publishing
+## 23. Status & device state publishing
+
+### 23.1 Lifecycle & progress status publishing
 
 Status publishing is allowed for startup/running/progress messages.
 
@@ -673,6 +680,349 @@ Minimum startup status:
   "timestamp": "2026-05-12T10:30:00Z"
 }
 ```
+
+### 23.2 Periodic device state collection & publishing
+
+The VyOS NATS agent runs directly within the VyOS router runtime environment (such as a VyOS VM or bare-metal VyOS appliance) and is the authoritative source for the router's operational state, network interface counters, physical and logical port link states, and network neighbors.
+
+It gathers metrics and periodically publishes a structured state snapshot exclusively over NATS on `state.<target>` to be consumed by the uCentral client and forwarded upstream to the OpenWiFi Cloud Gateway.
+
+#### 23.2.1 Execution Environment & Metric Scoping
+
+* **Execution Boundary:** `vyos-nats-agent` executes inside the VyOS router runtime environment (VyOS VM or bare-metal appliance) with direct access to local VyOS configuration APIs.
+* **Metric Scoping:** All telemetry (`/proc`, `/sys`, `iproute2`, LLDP) reflects the **VyOS Router Appliance** (guest CPU/RAM, routing interfaces, and routed client neighbors), not the underlying Ubuntu hypervisor host. Host bare-metal infrastructure monitoring is handled out-of-band and is decoupled from OpenWiFi router state.
+
+#### Subject Routing & Separation Rules
+
+* **Exclusive `state.<target>` routing:** Periodic operational state MUST be published exclusively on `state.<target>`.
+* **On-Demand live query (`state.get.<target>`):** The agent registers a request-reply handler on `state.get.<target>`. When a query arrives, it collects fresh router metrics (/proc, sysfs, Netlink) immediately, computes transient deltas without mutating or advancing the periodic baseline, and responds on the reply inbox with an `agentcore.StateEnvelope`.
+* **Separation from `status.<target>` and `status.get.<target>`:** The existing `status.<target>` and `status.get.<target>` subjects are strictly reserved for lifecycle events (e.g. startup) and configure/action execution progress. These are not interchangeable message types: periodic and on-demand device state have a completely different schema and purpose. Publishing full device-state payloads on the status subjects could cause consumers to interpret them as progress/status messages or reject them as invalid.
+* **Agentcore prerequisite:** Support for dedicated `state.<target>` and `state.get.<target>` subjects in `agentcore` (`DefaultStatePattern = "state.%s"`, `DefaultStateGetPattern = "state.get.%s"`, `PublishState`, `RegisterStateHandler`, and `RegisterStateGetHandler`) must be implemented or verified before state features are enabled.
+
+```text
++---------------------------------------------------------------------------------------------------+
+|                                 VYOS NATS AGENT STATE TELEMETRY                                   |
+|                                                                                                   |
+|  [ VyOS Router Environment (/proc, sysfs, iproute2) ]                                            |
+|       │                                           ▲                                               |
+|       ▼ (Periodic collection)                     │ (On-Demand live query)                        |
+|  [ Periodic State Collector ]              [ On-Demand Responder (state.get.<target>) ]           |
+|       │                                           ▲                                               |
+|       ▼                                           │ (Request)                                     |
+|  [ NATS: state.<target> ]                  [ NATS: state.get.<target> ]                           |
+|  (Publish StateEnvelope)                   (Request-Reply / Live State)                           |
++───────┼───────────────────────────────────────────▲───────────────────────────────────────────────+
+        │                                           │
+        ▼ (Periodic State)                          │ (Live Query)
+   [ uCentral Client ] ─────────────────────────────┘
+```
+
+#### Metrics Data Sources
+
+| State Section | Metric Fields | Linux / VyOS Source |
+| :--- | :--- | :--- |
+| **`unit.load`** | `[1m, 5m, 15m]` load averages | `/proc/loadavg` |
+| **`unit.cpu_load`** | Aggregate & per-core CPU load % | `/proc/stat` |
+| **`unit.memory`** | `total`, `free`, `cached`, `buffered` RAM (bytes) | `/proc/meminfo` |
+| **`unit.uptime`** | Seconds since boot (integer) | `/proc/uptime` |
+| **`unit.localtime`** | Current epoch timestamp | Standard system clock |
+| **`interfaces`** | Name, interface uptime, IP addresses | `ip -j addr`, `ip -j link` |
+| **`interfaces.counters`** | Cumulative rx/tx bytes, packets, errors, drops | `/sys/class/net/<iface>/statistics/` or `/proc/net/dev` |
+| **`interfaces.delta_counters`** | Byte/packet increment since previous sampling tick | In-memory delta computation |
+| **`interfaces.clients`** | Observed L3 network neighbors (filtered MAC, IP, ports) | `ip -j neigh` (filtered) with optional DHCP lease / Bridge FDB reconciliation |
+| **`link-state`** | `carrier` (bool), `speed` (Mbps), `duplex` (`full`/`half`) | `/sys/class/net/<iface>/{carrier,speed,duplex}` |
+| **`lldp-peers`** | Connected switches/routers announcing via LLDP | `lldpcli -f json show neighbors` (empty `{}` if inactive) |
+| **`radios`** | Radio metrics (channel, frequency, tx_power, active SSIDs) | Populated via `nl80211`/`iw` when Wi-Fi hardware is present; empty array `[]` on purely wired appliances |
+| **`uuid`** | Current applied configuration UUID | Read from local state file (`/tmp/vyos-nats-agent/state.json`). Formatted as decimal string (e.g. `"1793880893"`), or `""`/`"0"` if no configuration has been applied yet. |
+
+#### 23.2.2 Neighbor Discovery & Client Telemetry Semantics (`interfaces.clients`)
+
+The `interfaces.clients` list represents **observed L3 network neighbors** rather than an authoritative connected-client inventory. In routed Linux environments, ARP/NDP caches reflect recently resolved IP-to-MAC mappings, meaning idle clients may age out while stale entries can linger.
+
+The collector applies the following rules when processing neighbors:
+
+1. **Neighbor State Filtering:**
+   * Entries extracted from `ip -j neigh` with states `FAILED`, `INCOMPLETE`, or `NOARP` are discarded.
+   * Only active/valid neighbor states are retained: `REACHABLE`, `PERMANENT`, `STALE`, `DELAY`, and `PROBE`.
+2. **Deduplication by MAC Address:**
+   * In dual-stack networks, a single client MAC often has both IPv4 and IPv6 (link-local and SLAAC/GUA) addresses.
+   * Neighbors are grouped by normalized MAC address (`strings.ToLower(mac)`). Multiple IP addresses are aggregated into the `ipv4_addresses` and `ipv6_addresses` arrays within a single `InterfaceClient` record rather than emitting duplicate client entries.
+3. **Bridge and VLAN Interface Attribution:**
+   * For bridge interfaces (e.g., `br0`), `ip -j neigh` attributes the neighbor to the bridge master device. Where bridge forwarding table lookup (`bridge -j fdb show`) resolves the MAC to a physical bridge port (e.g., `eth1`), `ports: ["eth1"]` is populated; otherwise, the interface name itself is used (`ports: ["br0"]`).
+   * For 802.1Q VLAN interfaces (e.g., `eth1.100`), the client is attributed to the specific VLAN subinterface under which the neighbor was resolved.
+4. **`last_seen` Semantics (Elapsed Seconds, Never Unix Epoch):**
+   * The OpenWiFi state schema defines `last_seen` as elapsed duration ("How long ago was traffic from this neighbour last seen."), mirroring AP firmware implementations (e.g., `now_monotonic - mac.ts` in seconds from `udevmand/src/mac.c`). It MUST represent elapsed seconds since last reliably observed activity at state collection time, and MUST NEVER be populated with a Unix epoch timestamp.
+   * **Use `0` Only for Verified Fresh Activity:** Use `0` only if fresh activity is actually known (e.g. traffic reliably observed during the current sampling second), NOT merely because an ARP/NDP entry is marked `REACHABLE`.
+   * **Omission when Age is Unmeasurable:** Kernel `ip -j neigh` state alone is not a last-packet timestamp. If activity age is not measurable or known, the collector MUST omit this optional field (`omitempty`) instead of inventing a timestamp or speculative age. No new MAC tracking subsystem is needed in v1.
+   * **Schema-Valid Omission:** In `TIP-olg-ucentral-schema` (`ucentral.state.pretty.json`), `last_seen` is an optional property of `#/$defs/interface.client`. Omitting the field produces valid JSON schema output.
+5. **Reconciliation for Authoritative Connected Clients:**
+   * When an authoritative connected-device inventory is required by the Gateway/UI, the collector reconciles multiple sources:
+     * **L2 Physical Link Presence:** Learned dynamic MACs from `bridge -j fdb show` and Wi-Fi station dumps (`nl80211`/`iw`).
+     * **L3 Address Assignment:** Active DHCP lease files (e.g., Kea/ISC DHCP leases).
+     * **L3 Activity:** Filtered ARP/NDP cache (`ip -j neigh`).
+   * Merging these sources produces a unified inventory containing client hostnames, lease expiration, verified L2 port presence, and L3 activity timestamps.
+6. **Required Test Matrix (`interfaces.clients` & `last_seen`):**
+   * `TestNeighbor_KnownAge`: Neighbor with measurable traffic activity includes `last_seen` as elapsed seconds ($\ge 0$).
+   * `TestNeighbor_UnknownAge_Omitted`: Neighbor sourced from ARP/NDP cache where last-packet age is not measurable omits `last_seen` entirely (`omitempty`), ensuring no fabricated age or epoch timestamp is published.
+   * `TestNeighbor_SchemaValidation_Omission`: Validates that serializing `interfaces.clients` without `last_seen` passes OpenWiFi state schema validation.
+
+#### 23.2.3 Applied Configuration UUID Checkpoint & Concurrency Semantics
+
+The configuration UUID published in `StateEnvelope.UUID` correlates the router's active operational state with the controller's configuration transactions:
+
+1. **Source & Type (`state.State{AppliedUUID string}`):** Sourced from the local state checkpoint (`internal/state/store.go`). It is represented as a string on the NATS envelope (carrying decimal timestamp strings such as `"1793880893"`).
+2. **Only Last Successfully Applied UUID:** The agent updates `AppliedUUID` only after a configuration transaction is committed successfully (`Result: success`). If an apply attempt fails validation or triggers a rollback (`Result: rolled_back`), `AppliedUUID` preserves the last-known-good active UUID. Failed or pending configurations are never reported.
+3. **Distinguishing Absent/Corrupt Checkpoint from `UUID = "0"`:**
+   * **`UUID = "0"`:** Explicitly denotes that the device has applied an initial/baseline or factory-default configuration.
+   * **Absent Checkpoint (file missing):** Fresh, unconfigured boot before any configuration has occurred; reported as empty `UUID: ""`.
+   * **Corrupt Checkpoint (unparseable JSON on disk):** Treated as empty `UUID: ""` and logged as a warning, preventing collector crashes.
+4. **Race-Free Checkpoint Access (Concurrency Safety):** `FileStore.Save()` writes to a temporary file (`.state-*.tmp`), syncs to disk (`tmpFile.Sync()`), and replaces the destination using a POSIX atomic rename (`os.Rename()`). Consequently, concurrent reads by `FileStore.Load()` during state collection are completely race-free and will never read torn or partially written data.
+
+#### 23.2.4 Interface Delta Counter Computation & Reset Semantics (`interfaces.delta_counters`)
+
+To mirror OpenWiFi AP behavior and prevent counter corruption or graph spikes, the state collector implements baseline tracking and reset detection for `interfaces.delta_counters`:
+
+1. **In-Memory Baseline per Interface:** The collector maintains an in-memory map keyed by interface name / `ifindex`:
+   `periodic_counters[iface] = { rx_bytes, tx_bytes, rx_packets, tx_packets, last_sampled_at }`
+2. **First Sample Behavior (Cold Boot / New Interface):** On agent startup or when an interface is newly discovered, establish the baseline sample. Set all `delta_counters` fields to `0` on the initial report to prevent historical cumulative counters from appearing as a single-interval traffic spike.
+3. **Reset & Underflow Detection (`current < previous`):** If an interface restarts (`down`/`up`), a VLAN/tunnel interface is recreated, or the driver counter resets, `current < previous` occurs. The collector must detect this condition, treat `current` as the new baseline, and emit `delta = 0` (or `current` if resetting from zero). It MUST NOT perform direct unsigned subtraction (`current - previous`), which causes a massive `uint64` integer underflow.
+4. **Interface Pruning & Lifecycle:** If an interface disappears from the system, its baseline entry is purged from memory. If it reappears later, it starts fresh from Step 2 with a zero-delta baseline.
+5. **Periodic Baseline Isolation (No Mutation by On-Demand Queries):** The periodic reporting loop has exclusive write ownership over `periodic_counters`. An on-demand live query (`state.get.<target>`) reads current kernel counters and computes transient delta values against `periodic_counters` for the on-demand response, but MUST NOT overwrite or advance `periodic_counters` or its timestamp. This ensures that the scheduled periodic reporting interval (e.g. 60s) and its bandwidth delta metrics are never distorted by ad-hoc queries.
+6. **Elapsed Time Measurement:** The collector records `last_sampled_at` with each baseline, ensuring accurate elapsed time $\Delta t$ calculation across scheduled intervals.
+7. **Required Unit Test Matrix:** Implement unit test coverage for:
+   * **Initial Baseline:** First sample produces zero deltas.
+   * **Monotonic Increments:** Normal delta calculation when `current >= previous`.
+   * **Counter Reset:** `current < previous` safely resets baseline and emits zero delta without underflow.
+   * **Interface Lifecycle:** Missing interfaces are pruned; reappearing interfaces establish a new baseline.
+   * **On-Demand Query Isolation:** Handling `state.get` queries between periodic samples computes transient deltas without advancing or mutating the periodic baseline; the subsequent scheduled periodic sample measures the full interval.
+   * **Reconnect Gaps:** Variable interval timing preserves accurate delta rates.
+
+#### 23.2.5 Dynamic Interval Propagation & Cloud Lifecycle Control (`metrics.statistics.interval`)
+
+To eliminate dual-timer desynchronization and ensure Cloud configuration changes take effect immediately:
+
+1. **Authoritative Cloud Source of Truth with Local Fallback:**
+   * **Source of Truth:** The VyOS agent treats the last successfully applied Cloud configuration's `metrics.statistics.interval` as the authoritative source of truth for its periodic telemetry sampling frequency.
+   * **Local Startup & Omission Fallback:** The collector initializes with a local configuration default of 60 seconds, configured via `agent.state.interval: 60s` (default: 60s). This fallback applies on initial cold boot (before any Cloud configuration has been applied) and whenever an applied Cloud configuration omits `metrics.statistics.interval`.
+2. **Schema Validation & Forwarding Boundary:**
+   * Ingress configurations are validated by the uCentral client against `TIP-olg-ucentral-schema` (`ucentral.schema.pretty.json`). Because the schema strictly enforces an integer `minimum: 60` for `metrics.statistics.interval`, any Cloud configuration containing `interval < 60` (including `interval: 0` or negative values) fails schema validation at ingress and is rejected.
+   * Only schema-validated desired configurations are forwarded to JetStream KV (`desired.<target>`). Payloads with invalid intervals are never written to KV.
+3. **Dynamic Ticker Adjustment on Apply:**
+   * When a validated configuration containing `metrics.statistics.interval >= 60` is successfully committed and applied, the state collector's background ticker is dynamically adjusted (`ticker.Reset(time.Duration(interval) * time.Second)`), overriding any previous interval.
+4. **Periodic State Disablement Status (Future Extension):**
+   * The OpenWiFi configuration schema currently enforces `minimum: 60` and does not define a schema-valid disablement mechanism (such as an explicit boolean flag). Pushing `interval: 0` is schema-invalid and rejected at ingress.
+   * Turning off periodic telemetry from the Cloud is therefore not supported under the current schema and is designated as a future extension pending an approved schema amendment.
+   * The agent publishes periodic telemetry continuously at the applied interval ($\ge 60$s) or 60s fallback.
+5. **On-Demand Live Queries Independent (`state.get.<target>`):**
+   * On-demand live state queries (`state.get.<target>`) operate completely independently of periodic state publishing and periodic intervals.
+   * Live queries execute via the dedicated worker pool (5 workers, 3s timeout) without mutating the periodic delta baseline or being constrained by periodic ticker frequency.
+6. **Rollback Resilience:**
+   * If a configuration transaction fails rendering or application and triggers a rollback (`Result: rolled_back`), the collector preserves or restores the sampling interval from the last successfully applied configuration (or falls back to the local 60s default).
+7. **Required Test Matrix:**
+   * `TestInterval_ValidMinimum`: Validates that a Cloud configuration with `metrics.statistics.interval: 60` adjusts the collection ticker to 60s.
+   * `TestInterval_ValidCustom`: Validates that a Cloud configuration with `metrics.statistics.interval: 120` adjusts the collection ticker to 120s.
+   * `TestInterval_MissingOmissionFallback`: Validates that a successfully applied Cloud configuration omitting `metrics.statistics.interval` causes the collector to fall back to the local 60s default (declarative baseline).
+   * `TestInterval_RejectedZero`: Validates that a desired configuration with `metrics.statistics.interval: 0` or `< 60` fails uCentral client schema validation, is rejected before JetStream KV write, and leaves the VyOS agent's active interval unchanged.
+   * `TestInterval_RollbackPreservation`: Validates that a failed configuration transaction rolling back preserves the sampling interval from the previously applied configuration.
+   * `TestInterval_OnDemandIndependence`: Validates that on-demand queries on `state.get.<target>` execute and return live telemetry independently of periodic interval settings.
+
+#### 23.2.6 On-Demand Collection Concurrency & Execution Boundary (`state.get.<target>`)
+
+To protect the router from overload and prevent starvation of configuration and action commands:
+
+1. **Configurable Execution Capacity:**
+   * Configured via `agent.state.max_concurrent_requests` (default: `5`) and supplied during `agentcore` initialization (`Config.StateGetWorkers = 5`).
+   * The VyOS agent alone owns this execution capacity and concurrency limit. The uCentral Client does not duplicate or mirror this setting.
+2. **Immediate Rejection on Saturation (No Waiting Queue):**
+   * If all 5 worker slots are actively executing state collections when a new query arrives on `state.get.<target>`, the agent must NOT queue or buffer the request.
+   * The agent immediately returns a typed, serialized `agentcore.StateGetReply` error response to the ephemeral NATS reply inbox (`msg.Reply`):
+     ```json
+     {
+       "version": "1.0",
+       "target": "vyos",
+       "error": {
+         "code": "service_busy",
+         "message": "All state collection workers are occupied"
+       }
+     }
+     ```
+   * **Subject & Correlation Invariants:** The reply is sent strictly to the NATS ephemeral reply inbox (`msg.Reply`). It is NEVER published to `result.<target>` or `status.<target>`. The native NATS reply inbox handles correlation with the requester's `RequestState()` call; no duplicate RPC ID is required.
+   * **NATS Wire vs. Cloud Gateway Code Distinction:** The NATS wire protocol uses the string error code `"service_busy"`. Note that the numeric code `2` (`result.status: {"error": 2, "text": "service busy: maximum concurrent state requests reached"}`) is the **Cloud Gateway REST RPC response mapping** applied upstream by the uCentral Client, NOT the NATS wire error code.
+3. **Execution Bounding (3-Second Deadline):**
+   * Each admitted collection is bounded to a strict 3-second context cancellation (`context.WithTimeout(ctx, 3*time.Second)`).
+   * This ensures execution terminates cleanly well within the uCentral Client's 5-second overall NATS deadline (`OLG_TIMEOUT_DISPATCH`).
+   * If collection exceeds 3 seconds, the agent returns `StateGetReply` with `error.code: "collection_timeout"`.
+4. **Nonblocking NATS Subscription Callback:**
+   * The NATS subscription callback for `state.get.<target>` performs only initial validation and instantaneous capacity admission (acquiring a semaphore slot).
+   * Once admitted, collection is immediately handed off to an asynchronous worker goroutine.
+   * The callback must NEVER run the 3-second collection inline on the NATS subscription dispatcher thread. This guarantees that configure (`cmd.configure.<target>`) and action (`cmd.action.<target>.*`) subscriptions are never blocked or starved by on-demand state requests.
+5. **Read-Only Baseline Isolation:**
+   * On-demand collection is strictly read-only with respect to `periodic_counters`. It computes transient deltas for the response, but never mutates the periodic baseline or its timestamp.
+6. **Capacity Release & Observability:**
+   * Worker capacity is strictly released on every exit path (`defer sem.Release()`): success, kernel read error, 3-second timeout, or panic recovery.
+   * Observability metrics: Expose active state workers gauge (`state_get_active_workers`), busy rejections (`state_get_busy_total`), and timeouts (`state_get_timeout_total`).
+7. **Required Test Matrix:**
+   * Concurrency saturation: 5 active collections saturated; the 6th simultaneous request receives an immediate `StateGetReply` with `error.code: "service_busy"` on its NATS reply inbox.
+   * Successful reply: Returns `StateGetReply` wrapping valid `StateEnvelope` on ephemeral reply inbox.
+   * Collection timeout: Collection taking > 3s aborts and returns `StateGetReply` with `error.code: "collection_timeout"`.
+   * Collection error: Internal kernel read failure returns `StateGetReply` with `error.code: "collection_failed"`.
+   * Worker slot release verified across all terminal conditions (successful reply, kernel read error, 3-second timeout expiration, and panic recovery).
+   * Starvation immunity: During 5 active concurrent state collections, concurrent `configure` or `action` commands are dispatched and executed immediately without delay.
+
+#### 23.2.7 Applied Topology Port Mapping & Role Derivation (`link-state` & `lldp-peers`)
+
+To accurately classify physical interfaces into WAN (`upstream`) and LAN (`downstream`) without relying on interface name heuristics, routing table queries, or LLDP neighbor types, the state collector derives its topology mapping strictly through an **explicit applied-port-role handoff pipeline** from the renderer through the configure service into persistent checkpoint storage:
+
+1. **Renderer Output Extension (`PhysicalPortRoles`):**
+   * The renderer (`olg-renderer-vyos`) resolves port selectors (`interfaces[].ethernet[].select-ports[]`, e.g. `["WAN*"]`, `["LAN1"]`) to physical Linux interfaces using its port map (`WithPortMap`, defaulting to `WAN*` $\rightarrow$ `eth0`, `LAN1` $\rightarrow$ `eth1`, `LAN2` $\rightarrow$ `eth2`, or platform-specific overrides).
+   * During normalization, the renderer correlates each physical interface with its interface definition's `role` (`"upstream"` or `"downstream"`).
+   * `olg-renderer-vyos/renderer.Output` is extended with:
+     ```go
+     PhysicalPortRoles map[string]string // e.g. {"eth0": "upstream", "eth1": "downstream"}
+     ```
+   * The VyOS renderer adapter (`internal/renderervyos/adapter.go`) passes this mapping through via `internal/renderer.Output.PhysicalPortRoles` directly into `configure.Service`. The telemetry collector does NOT independently classify ports or duplicate selector resolution.
+
+2. **Candidate Lifecycle & Atomic Checkpoint Persistence (`state.json`):**
+   * **Candidate Status:** During rendering and execution, `PhysicalPortRoles` is treated as a *candidate* mapping. It is NOT authoritative until `applyEngine.Apply()` succeeds.
+   * **Atomic State Checkpoint:** Upon successful apply, the configure service saves `AppliedUUID`, `AppliedAt`, and `PhysicalPortRoles` together into the existing `state.State` struct:
+     ```go
+     type State struct {
+         Target            string            `json:"target"`
+         AppliedUUID       string            `json:"applied_uuid"`
+         AppliedAt         time.Time         `json:"applied_at"`
+         PhysicalPortRoles map[string]string `json:"physical_port_roles,omitempty"`
+     }
+     ```
+   * Saved atomically to `/tmp/vyos-nats-agent/state.json` via the existing `FileStore.Save()` path.
+   * **Consistent Snapshot Read:** The background state collector reads `AppliedUUID` and `PhysicalPortRoles` together from this same consistent checkpoint file. This guarantees that published `link-state` roles match the exact configuration identified by `AppliedUUID` without read-write tearing or race conditions.
+
+3. **Rollback Resilience & Topology Degradation:**
+   * **Confirmed Rollback:** If a configuration attempt fails rendering or apply and confirmed rollback succeeds (`Result: rolled_back`), the agent retains the previous applied `PhysicalPortRoles` and `AppliedUUID`.
+   * **Degraded Topology State:** If the actual running configuration may have changed and rollback fails, or if writing the checkpoint to `/tmp` fails, the running state is indeterminate. The agent flags the topology as **degraded** (omits unverified port roles from `link-state` and logs an observable diagnostic) rather than presenting stale or unverified roles as authoritative truth.
+
+4. **Lifecycle Semantics (Process Restart, VM Reboot, Legacy Checkpoint):**
+   * **Agent Process Restart:** On agent process restart (crash or service restart), the agent reloads `/tmp/vyos-nats-agent/state.json` on startup and immediately restores the verified applied port roles without reapplying.
+   * **VM Reboot:** On VM reboot, `/tmp` is wiped clean (`tmpfs`). The agent intentionally starts with no applied state. Normal JetStream `desired.<target>` reconciliation triggers, fetches the desired configuration, reapplies it, and rebuilds the checkpoint and port roles from scratch.
+   * **First Boot Cold State:** The agent MUST NOT declare or assume a default WAN/LAN mapping as applied on first boot before reconciliation has run. Until a verified applied configuration exists, physical ports remain unclassified and are omitted from `link-state` role sub-trees with an observable diagnostic log.
+   * **Legacy Checkpoint Upgrade:** If an older checkpoint exists with a matching `AppliedUUID` but lacks `physical_port_roles`, the agent regenerates the mapping by running renderer normalization against the verified desired configuration without re-running VyOS CLI set commands. If desired config is missing or unverified, unknown classifications are safely omitted.
+
+5. **Strict Anti-Guessing Guardrails:**
+   * The collector MUST NOT classify WAN/LAN from:
+     * Unapplied, pending, or failed desired configurations.
+     * Guessed interface naming conventions (e.g., assuming `eth0` is WAN).
+     * Kernel routing table entries (e.g., `ip route show default`).
+     * LLDP neighbor chassis or port capability types.
+   * **Omission Policy:** Until a verified applied mapping exists, or for interfaces that are unknown, unmapped, shared/trunk, or unsupported (including bridges, VLAN subinterfaces, and tunnels), the collector MUST **omit** them from `link-state.upstream` and `link-state.downstream`, emitting an observable diagnostic log.
+
+6. **Physical Ports vs. Logical Interfaces in Telemetry:**
+   * **`link-state` (Physical Ports Only):** Physical ports resolved by the applied port mapping are populated with carrier state, negotiated speed (Mbps), and duplex mode under their assigned role (`link-state.upstream.<iface>` or `link-state.downstream.<iface>`).
+   * **`lldp-peers` (Local Port Attribution):** Discovered LLDP neighbors are attached to the local receiving physical interface under the same role assigned to that physical interface (`lldp-peers.upstream.<iface>` or `lldp-peers.downstream.<iface>`). Empty LLDP tables (`"upstream": {}`, `"downstream": {}`) are valid.
+   * **Bounded Execution:** Sampling LLDP peers via `lldpcli` (e.g., `lldpcli -f json show neighbors`) is executed with a strict bounded timeout (2 seconds) and capped output parsing.
+   * **Logical Bridges & VLANs:** Logical interfaces, bridge master devices (`br0`), and 802.1Q subinterfaces (`eth1.100`) remain strictly in the root `interfaces[]` list; they are NOT placed in `link-state` or `lldp-peers`.
+   * **Wired-Only Router Profile:** Purely wired appliances without wireless PHYs report `"radios": []` (empty array, never null) so Cloud Gateway associations calculations complete safely.
+   * **Schema Validation:** Serialized interface keys under `link-state` and `lldp-peers` must strictly match `^(eth|lan|wan)[0-9]*$`.
+
+7. **Required Acceptance Test Matrix:**
+   * `TestPortMap_DefaultResolution`: Validates that default `WithPortMap` resolves selectors (`WAN*` $\rightarrow$ `eth0`, `LAN1` $\rightarrow$ `eth1`, `LAN2` $\rightarrow$ `eth2`) to `PhysicalPortRoles: {"eth0": "upstream", "eth1": "downstream", "eth2": "downstream"}` in renderer output.
+   * `TestPortMap_CustomOverride`: Validates that platform overrides passed via `WithPortMap` (e.g., `WAN*` $\rightarrow$ `eth3`) produce corresponding `PhysicalPortRoles` in renderer output.
+   * `TestPortMap_ApplySuccess_Checkpoint`: Validates that on successful `Apply()`, `configure.Service` writes `AppliedUUID`, `AppliedAt`, and `PhysicalPortRoles` together to `/tmp/vyos-nats-agent/state.json`.
+   * `TestPortMap_RoleChange`: Validates that applying a configuration change that swaps port roles updates `PhysicalPortRoles` in the checkpoint and updates collector output dynamically.
+   * `TestPortMap_FailedApply_RollbackPreservation`: Validates that a failed configuration transaction with confirmed rollback retains the previously applied `AppliedUUID` and `PhysicalPortRoles`.
+   * `TestPortMap_CheckpointSaveFailure_Degraded`: Validates that failure to write `/tmp/vyos-nats-agent/state.json` flags topology as degraded, omitting unverified roles and logging a diagnostic.
+   * `TestPortMap_ConcurrentReadConsistency`: Validates atomic snapshot consistency when collector reads `state.json` concurrently with configure service writes.
+   * `TestPortMap_ProcessRestart_Reload`: Validates that agent process restart reloads `PhysicalPortRoles` from `/tmp/vyos-nats-agent/state.json` without reapplying VyOS commands.
+   * `TestPortMap_VMReboot_Reconcile`: Validates that VM reboot w/ empty `/tmp` omits unclassified ports on first boot until JetStream reconciliation reapplies desired config and rebuilds the checkpoint.
+   * `TestPortMap_LegacyCheckpointUpgrade`: Validates that loading a legacy checkpoint (matching UUID but missing `physical_port_roles`) regenerates port roles from verified desired config without re-running VyOS CLI apply.
+   * `TestPortMap_UnknownPortOmission`: Validates that unclassified or trunk ports are safely omitted from `link-state` and `lldp-peers` with an observable diagnostic log.
+   * `TestLLDP_PortAttribution`: Validates that LLDP neighbors are attributed to the local receiving physical interface under that port's assigned WAN/LAN role.
+   * `TestState_WiredOnlyRouter`: Validates that state collection on a wired appliance emits `"radios": []` without panic or schema error.
+   * `TestSchemaValidation_PortKeys`: Validates that all keys in `link-state` and `lldp-peers` strictly match `^(eth|lan|wan)[0-9]*$`.
+
+#### Published State Wire Schema (`agentcore.StateEnvelope`)
+
+The agent wraps the device telemetry snapshot inside a standard `agentcore.StateEnvelope` and publishes it via `client.PublishState(ctx, envelope)`. The outer envelope standardizes wire versioning, target identity, applied config UUID correlation, and timestamps, while the inner `payload` carries pure OpenWiFi-compliant router telemetry (excluding inner `serial` or `uuid` to avoid inner/outer identity ambiguity):
+
+```json
+{
+  "version": "1.0",
+  "uuid": "1793880893",
+  "target": "vyos",
+  "payload": {
+    "version": 1,
+    "unit": {
+      "load": [ 0.15, 0.08, 0.05 ],
+      "cpu_load": [ 4, 5, 3, 4, 4 ],
+      "localtime": 1793968533,
+      "memory": {
+        "total": 4124565504,
+        "free": 3201454080,
+        "cached": 450123776,
+        "buffered": 89456640
+      },
+      "uptime": 119483
+    },
+    "interfaces": [
+      {
+        "name": "eth0",
+        "location": "/interfaces/0",
+        "uptime": 23061,
+        "ipv4": {
+          "addresses": [ "172.16.1.228/21" ],
+          "dhcp_server": "172.16.0.1",
+          "leasetime": 43200
+        },
+        "counters": {
+          "rx_bytes": 1051992836,
+          "rx_packets": 5440208,
+          "tx_bytes": 4403888,
+          "tx_packets": 27885,
+          "rx_dropped": 0,
+          "rx_errors": 0,
+          "tx_dropped": 0,
+          "tx_errors": 0,
+          "multicast": 884271,
+          "collisions": 0
+        },
+        "delta_counters": {
+          "rx_bytes": 659383,
+          "rx_packets": 3852,
+          "tx_bytes": 4141,
+          "tx_packets": 17
+        },
+        "clients": [
+          {
+            "mac": "00:09:0f:09:80:04",
+            "ipv4_addresses": [ "172.16.0.1" ],
+            "ports": [ "eth0" ],
+            "last_seen": 0
+          }
+        ]
+      }
+    ],
+    "link-state": {
+      "upstream": {
+        "eth0": { "carrier": true, "speed": 1000, "duplex": "full" }
+      },
+      "downstream": {
+        "eth1": { "carrier": false, "speed": 0 }
+      }
+    },
+    "lldp-peers": {
+      "upstream": {},
+      "downstream": {}
+    },
+    "radios": []
+  },
+  "timestamp": "2026-05-12T10:30:00Z"
+}
+```
+
+#### Lifecycle & Concurrency Rules
+
+1. **Independent Routine:** The State Collector runs in a dedicated background goroutine started during `Runtime.Run(ctx)`.
+2. **Delta Calculation:** The collector caches the previous interface counter snapshot in memory. On each tick, it computes the delta before updating the stored cache.
+3. **Non-Blocking Sampling:** Collecting metrics from `/proc` and `/sys` is done using fast direct file reads or netlink calls with a strict 3-second timeout to avoid locking agent threads.
+4. **Publish Failure Resilience:** If NATS publishing fails (e.g. during broker reconnects), the collector logs a warning, preserves counter baselines, and continues on the next scheduled interval without crashing the daemon.
 
 ## 24. Startup reconcile
 
