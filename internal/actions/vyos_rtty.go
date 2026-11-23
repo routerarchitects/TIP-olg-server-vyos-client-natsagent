@@ -164,6 +164,7 @@ type VyOSRTTYExecutor struct {
 	runner   RTTYProcessRunner
 	certFile string
 	keyFile  string
+	caFile   string
 	mu       sync.Mutex
 }
 
@@ -183,9 +184,36 @@ func (e *VyOSRTTYExecutor) WithCertAndKey(certFile, keyFile string) *VyOSRTTYExe
 	return e
 }
 
+// WithCACert sets custom CA cert path (useful for tests or custom environments).
+func (e *VyOSRTTYExecutor) WithCACert(caFile string) *VyOSRTTYExecutor {
+	e.caFile = caFile
+	return e
+}
+
 func fileExists(path string) bool {
 	fi, err := os.Stat(path)
 	return err == nil && !fi.IsDir()
+}
+
+func (e *VyOSRTTYExecutor) findCACert() string {
+	if e.caFile != "" {
+		return e.caFile
+	}
+	if c := os.Getenv("RTTY_CA_FILE"); c != "" && fileExists(c) {
+		return c
+	}
+	candidates := []string{
+		"/etc/olg/device-certs/ca.pem",
+		"/etc/rtty/ca.pem",
+		"/etc/olg/secrets/ca.crt",
+		"/etc/olg/client/ca.crt",
+	}
+	for _, p := range candidates {
+		if fileExists(p) {
+			return p
+		}
+	}
+	return ""
 }
 
 func (e *VyOSRTTYExecutor) findCertAndKey() (string, string) {
@@ -267,6 +295,9 @@ func (e *VyOSRTTYExecutor) Execute(ctx context.Context, msg agentcore.ActionComm
 		args = append(args, "-e", strconv.Itoa(payload.Timeout))
 	}
 	args = append(args, "-c", cert, "-k", key)
+	if ca := e.findCACert(); ca != "" {
+		args = append(args, "-C", ca)
+	}
 
 	if err := e.runner.KillExisting(ctx); err != nil {
 		return Output{}, fmt.Errorf("kill existing rtty: %w", err)

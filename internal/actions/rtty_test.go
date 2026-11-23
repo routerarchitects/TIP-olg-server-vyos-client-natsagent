@@ -283,6 +283,53 @@ func TestVyOSRTTYExecutor_Success(t *testing.T) {
 	}
 }
 
+func TestVyOSRTTYExecutor_WithCACert(t *testing.T) {
+	runner := &fakeRTTYProcessRunner{}
+	exec := NewVyOSRTTYExecutor(runner).
+		WithCertAndKey("/tmp/cert.pem", "/tmp/key.pem").
+		WithCACert("/tmp/ca.pem")
+
+	ctx := context.Background()
+	cmd := agentcore.ActionCommand{
+		Action: ActionRTTY,
+		Target: "vyos",
+		RPCID:  "rpc-ca-test",
+		Payload: []byte(`{
+			"id": "conn123",
+			"server": "gw.openwifi.net",
+			"port": 5912,
+			"token": "tok456",
+			"timeout": 60
+		}`),
+	}
+
+	out, err := exec.Execute(ctx, cmd)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out.Message != "rtty session initiated" {
+		t.Errorf("unexpected message: %s", out.Message)
+	}
+
+	expectedArgs := []string{
+		"-I", "conn123",
+		"-h", "gw.openwifi.net",
+		"-p", "5912",
+		"-t", "tok456",
+		"-s",
+		"-a",
+		"-v",
+		"-d", "VyOS",
+		"-e", "60",
+		"-c", "/tmp/cert.pem",
+		"-k", "/tmp/key.pem",
+		"-C", "/tmp/ca.pem",
+	}
+	if !reflect.DeepEqual(runner.startArgs, expectedArgs) {
+		t.Errorf("startArgs = %v, want %v", runner.startArgs, expectedArgs)
+	}
+}
+
 func TestVyOSRTTYExecutor_Errors(t *testing.T) {
 	ctx := context.Background()
 
