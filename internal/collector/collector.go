@@ -192,6 +192,14 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 			ports := roleToPorts[role]
 			sort.Strings(ports)
 
+			ifaceName := role
+			switch strings.ToLower(role) {
+			case "upstream":
+				ifaceName = "upv0"
+			case "downstream":
+				ifaceName = "downv0"
+			}
+
 			// Collect associated devices (physical ports + master bridge if present)
 			associatedDevs := make(map[string]bool)
 			for _, p := range ports {
@@ -283,9 +291,9 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 				}
 			}
 
-			// Baseline and delta calculation for the role
+			// Baseline and delta calculation for the interface
 			var deltas InterfaceDeltaCounters
-			b, hasBaseline := c.baselines[role]
+			b, hasBaseline := c.baselines[ifaceName]
 			if !hasBaseline || currCounters.RxBytes < b.rxBytes || currCounters.TxBytes < b.txBytes ||
 				currCounters.RxPackets < b.rxPackets || currCounters.TxPackets < b.txPackets {
 				deltas = InterfaceDeltaCounters{
@@ -295,7 +303,7 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 					TxPackets: 0,
 				}
 				if isPeriodic {
-					c.baselines[role] = counterBaseline{
+					c.baselines[ifaceName] = counterBaseline{
 						rxBytes:   currCounters.RxBytes,
 						txBytes:   currCounters.TxBytes,
 						rxPackets: currCounters.RxPackets,
@@ -311,7 +319,7 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 					TxPackets: currCounters.TxPackets - b.txPackets,
 				}
 				if isPeriodic {
-					c.baselines[role] = counterBaseline{
+					c.baselines[ifaceName] = counterBaseline{
 						rxBytes:   currCounters.RxBytes,
 						txBytes:   currCounters.TxBytes,
 						rxPackets: currCounters.RxPackets,
@@ -322,7 +330,7 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 			}
 
 			ifaceState := InterfaceState{
-				Name:          role,
+				Name:          ifaceName,
 				Uptime:        maxUptime,
 				IPv6Addresses: ipv6Addrs,
 				Counters:      currCounters,
@@ -337,7 +345,7 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 				}
 			}
 			interfaces = append(interfaces, ifaceState)
-			currentIfaces[role] = true
+			currentIfaces[ifaceName] = true
 		}
 	} else {
 		// Fallback for unconfigured or mock testing environments without port roles:

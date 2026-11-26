@@ -491,18 +491,18 @@ func TestPortMap_InterfacesRoleMappingAndFiltering(t *testing.T) {
 	}
 
 	if len(payload.Interfaces) != 2 {
-		t.Fatalf("expected exactly 2 interfaces (upstream & downstream), got %d: %+v", len(payload.Interfaces), payload.Interfaces)
+		t.Fatalf("expected exactly 2 interfaces (upv0 & downv0), got %d: %+v", len(payload.Interfaces), payload.Interfaces)
 	}
 
-	if payload.Interfaces[0].Name != "upstream" {
-		t.Fatalf("expected first interface to be 'upstream', got %q", payload.Interfaces[0].Name)
+	if payload.Interfaces[0].Name != "upv0" {
+		t.Fatalf("expected first interface to be 'upv0', got %q", payload.Interfaces[0].Name)
 	}
 	if payload.Interfaces[0].Counters.RxBytes != 1000 || payload.Interfaces[0].Counters.TxBytes != 2000 {
 		t.Fatalf("expected upstream counters from eth0 (1000/2000), got %+v", payload.Interfaces[0].Counters)
 	}
 
-	if payload.Interfaces[1].Name != "downstream" {
-		t.Fatalf("expected second interface to be 'downstream', got %q", payload.Interfaces[1].Name)
+	if payload.Interfaces[1].Name != "downv0" {
+		t.Fatalf("expected second interface to be 'downv0', got %q", payload.Interfaces[1].Name)
 	}
 	if payload.Interfaces[1].Counters.RxBytes != 3000 || payload.Interfaces[1].Counters.TxBytes != 4000 {
 		t.Fatalf("expected downstream counters from eth1 (3000/4000), got %+v", payload.Interfaces[1].Counters)
