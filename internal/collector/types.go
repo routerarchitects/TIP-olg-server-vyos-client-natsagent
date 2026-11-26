@@ -2,12 +2,12 @@ package collector
 
 // StatePayload represents the OpenWiFi router telemetry payload published inside StateEnvelope.
 type StatePayload struct {
-	Version    int                    `json:"version"`
-	Unit       UnitState              `json:"unit"`
-	Interfaces []InterfaceState       `json:"interfaces"`
-	LinkState  LinkStateReport        `json:"link-state"`
-	LLDPPeers  LLDPPeersReport        `json:"lldp-peers"`
-	Radios     []interface{}          `json:"radios"`
+	Version    int              `json:"version"`
+	Unit       UnitState        `json:"unit"`
+	Interfaces []InterfaceState `json:"interfaces"`
+	LinkState  LinkStateReport  `json:"link-state"`
+	LLDPPeers  LLDPPeersReport  `json:"lldp-peers"`
+	Radios     []interface{}    `json:"radios"`
 }
 
 // UnitState carries system resource metrics.
