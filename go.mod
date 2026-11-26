@@ -16,7 +16,3 @@ require (
 	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 )
-
-replace github.com/Telecominfraproject/olg-nats-agent-core => ../TIP-olg-nats-agent-core
-
-replace github.com/Telecominfraproject/olg-renderer-vyos => ../TIP-olg-renderer-vyos
