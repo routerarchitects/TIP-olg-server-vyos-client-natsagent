@@ -11,6 +11,7 @@ import (
 	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/actions"
 	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/apply"
 	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/applyvyos"
+	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/collector"
 	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/config"
 	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/configure"
 	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/renderer"
@@ -28,6 +29,9 @@ type Runtime struct {
 
 	configureService *configure.Service
 	actionService    *actions.Service
+	collector        *collector.Collector
+	stateInterval    time.Duration
+	stateIntervalCh  chan time.Duration
 
 	mu                      sync.Mutex
 	started                 bool
@@ -144,6 +148,37 @@ func New(appCfg *config.AppConfig, coreCfg agentcore.Config, opts ...Option) (*R
 	if err != nil {
 		return nil, fmt.Errorf("create configure service: %w", err)
 	}
+
+	stateCollector, err := collector.New(collector.Config{
+		Target:             appCfg.Agent.Target,
+		StateStore:         stateStore,
+		IsTopologyDegraded: configureService.IsTopologyDegraded,
+		Logger:             options.logger,
+		Now:                options.now,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create state collector: %w", err)
+	}
+
+	stateInterval := 60 * time.Second
+	if appCfg.Agent.State.Interval != "" {
+		if d, err := time.ParseDuration(appCfg.Agent.State.Interval); err == nil && d >= time.Second {
+			stateInterval = d
+		}
+	}
+	stateIntervalCh := make(chan time.Duration, 10)
+	configureService.SetOnIntervalChanged(func(sec int) {
+		var d time.Duration
+		if sec >= 60 {
+			d = time.Duration(sec) * time.Second
+		} else {
+			d = stateInterval
+		}
+		select {
+		case stateIntervalCh <- d:
+		default:
+		}
+	})
 	var traceExecutor actions.Executor
 	if appCfg.Agent.Actions.Mode == "real" {
 		traceExecutor = actions.NewVyOSTraceExecutor(actions.NewRealCommandRunner(), nil)
@@ -179,6 +214,9 @@ func New(appCfg *config.AppConfig, coreCfg agentcore.Config, opts ...Option) (*R
 		now:              options.now,
 		configureService: configureService,
 		actionService:    actionService,
+		collector:        stateCollector,
+		stateInterval:    stateInterval,
+		stateIntervalCh:  stateIntervalCh,
 		ctx:              rCtx,
 		cancel:           rCancel,
 	}

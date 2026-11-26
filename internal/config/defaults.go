@@ -12,6 +12,10 @@ func DefaultAppConfig() AppConfig {
 			Version:   "0.1.0",
 			Target:    "vyos",
 			StateFile: "/tmp/vyos-nats-agent/state.json",
+			State: StateConfig{
+				Interval:              "60s",
+				MaxConcurrentRequests: 5,
+			},
 			Logging: LoggingConfig{
 				Enabled: true,
 				Level:   "info",
@@ -51,6 +55,8 @@ func DefaultAppConfig() AppConfig {
 				ResultPattern:    "result.%s",
 				StatusPattern:    "status.%s",
 				HealthPattern:    "health.%s",
+				StatePattern:     "state.%s",
+				StateGetPattern:  "state.get.%s",
 			},
 			KV: KVConfig{
 				Bucket:           "cfg_desired",

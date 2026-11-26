@@ -140,7 +140,7 @@ func TestRendererAdapterInvalidPayloadReturnsError(t *testing.T) {
 	if backend.calls != 0 {
 		t.Fatalf("backend calls got=%d want=0", backend.calls)
 	}
-	if out != (rendererOutputZero()) {
+	if !out.IsZero() {
 		t.Fatalf("rendered output got=%+v want zero", out)
 	}
 }
@@ -241,7 +241,7 @@ func TestRendererAdapterPropagatesRendererError(t *testing.T) {
 	if !strings.Contains(err.Error(), "vyos render failed") || !strings.Contains(err.Error(), backendErr.Error()) {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if out != (rendererOutputZero()) {
+	if !out.IsZero() {
 		t.Fatalf("rendered output got=%+v want zero", out)
 	}
 	if backend.calls != 1 {

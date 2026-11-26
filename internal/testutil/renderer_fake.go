@@ -32,7 +32,7 @@ func (f *FakeRenderer) Render(ctx context.Context, desired agentcore.StoredDesir
 	validate := f.Validate
 	err := f.Err
 	out := f.Output
-	useOutput := f.UseOutput || out != (renderer.Output{})
+	useOutput := f.UseOutput || !isZeroOutput(out)
 	f.mu.Unlock()
 
 	if validate != nil {
@@ -51,6 +51,10 @@ func (f *FakeRenderer) Render(ctx context.Context, desired agentcore.StoredDesir
 		UUID:   desired.Record.UUID,
 		Text:   "# rendered by FakeRenderer\n",
 	}, nil
+}
+
+func isZeroOutput(o renderer.Output) bool {
+	return o.Target == "" && o.UUID == "" && o.Text == "" && len(o.PhysicalPortRoles) == 0
 }
 
 func (f *FakeRenderer) Calls() int {

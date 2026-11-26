@@ -103,6 +103,23 @@ func (c AppConfig) Validate() error {
 		}
 	}
 
+	if c.AgentCore.Subjects.StatePattern != "" {
+		if err := validateSubjectPattern("agentcore.subjects.state_pattern", c.AgentCore.Subjects.StatePattern, 1); err != nil {
+			return err
+		}
+	}
+	if c.AgentCore.Subjects.StateGetPattern != "" {
+		if err := validateSubjectPattern("agentcore.subjects.state_get_pattern", c.AgentCore.Subjects.StateGetPattern, 1); err != nil {
+			return err
+		}
+	}
+
+	if strings.TrimSpace(c.Agent.State.Interval) != "" {
+		if _, err := parseDurationField("agent.state.interval", c.Agent.State.Interval, false); err != nil {
+			return err
+		}
+	}
+
 	if strings.TrimSpace(c.AgentCore.KV.Bucket) == "" {
 		return fmt.Errorf("agentcore.kv.bucket is required")
 	}
