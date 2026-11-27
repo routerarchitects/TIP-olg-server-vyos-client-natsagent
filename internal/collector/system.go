@@ -17,6 +17,8 @@ import (
 // InterfaceRaw represents raw interface configuration and counters collected from kernel/tools.
 type InterfaceRaw struct {
 	Name          string
+	Master        string
+	Link          string
 	IPv4Addresses []string
 	DHCPServer    string
 	LeaseTime     uint32
@@ -36,7 +38,7 @@ type NeighborRaw struct {
 // SystemReader defines the abstraction for gathering host telemetry.
 type SystemReader interface {
 	ReadLoadAvg() ([3]float64, error)
-	ReadCPULoad() ([]int, error)
+	ReadCPULoad(updateBaseline bool) ([]int, error)
 	ReadMemInfo() (MemoryState, error)
 	ReadUptime() (uint64, error)
 	ReadInterfaces(ctx context.Context) ([]InterfaceRaw, error)
@@ -81,7 +83,7 @@ func (r *LinuxSystemReader) ReadLoadAvg() ([3]float64, error) {
 	return load, nil
 }
 
-func (r *LinuxSystemReader) ReadCPULoad() ([]int, error) {
+func (r *LinuxSystemReader) ReadCPULoad(updateBaseline bool) ([]int, error) {
 	file, err := os.Open("/proc/stat")
 	if err != nil {
 		return nil, fmt.Errorf("read /proc/stat: %w", err)
@@ -109,6 +111,9 @@ func (r *LinuxSystemReader) ReadCPULoad() ([]int, error) {
 		}
 		currentSamples = append(currentSamples, cpuSample{total: total, idle: idle})
 	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan /proc/stat: %w", err)
+	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -123,7 +128,9 @@ func (r *LinuxSystemReader) ReadCPULoad() ([]int, error) {
 			}
 		}
 	}
-	r.prevCPULoad = currentSamples
+	if updateBaseline {
+		r.prevCPULoad = currentSamples
+	}
 	return loads, nil
 }
 
@@ -185,6 +192,8 @@ func (r *LinuxSystemReader) ReadUptime() (uint64, error) {
 
 type ipAddrJSONEntry struct {
 	IfName   string `json:"ifname"`
+	Master   string `json:"master"`
+	Link     string `json:"link"`
 	AddrInfo []struct {
 		Family    string `json:"family"`
 		Local     string `json:"local"`
@@ -209,7 +218,10 @@ func (r *LinuxSystemReader) ReadInterfaces(ctx context.Context) ([]InterfaceRaw,
 		return nil, fmt.Errorf("unmarshal ip -j addr: %w", err)
 	}
 
-	countersMap, _ := readProcNetDev()
+	countersMap, err := readProcNetDev()
+	if err != nil {
+		return nil, fmt.Errorf("read /proc/net/dev: %w", err)
+	}
 
 	result := make([]InterfaceRaw, 0, len(parsed))
 	for _, entry := range parsed {
@@ -218,6 +230,8 @@ func (r *LinuxSystemReader) ReadInterfaces(ctx context.Context) ([]InterfaceRaw,
 		}
 		raw := InterfaceRaw{
 			Name:     entry.IfName,
+			Master:   entry.Master,
+			Link:     entry.Link,
 			Counters: countersMap[entry.IfName],
 		}
 		for _, addr := range entry.AddrInfo {
@@ -274,6 +288,9 @@ func readProcNetDev() (map[string]InterfaceCounters, error) {
 		c.TxDropped, _ = strconv.ParseUint(fields[11], 10, 64)
 		c.Collisions, _ = strconv.ParseUint(fields[13], 10, 64)
 		res[iface] = c
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
 	}
 	return res, nil
 }

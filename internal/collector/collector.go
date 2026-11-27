@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -15,8 +14,6 @@ import (
 	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
 	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/state"
 )
-
-var portKeyPattern = regexp.MustCompile(`^(eth|lan|wan)[0-9]*$`)
 
 // StateStore abstracts reading configuration state checkpoints.
 type StateStore interface {
@@ -42,6 +39,7 @@ type Collector struct {
 
 	mu        sync.Mutex
 	baselines map[string]counterBaseline
+	portRoles map[string]string
 }
 
 // Config holds dependencies for Collector creation.
@@ -77,6 +75,7 @@ func New(cfg Config) (*Collector, error) {
 		logger:             cfg.Logger,
 		now:                cfg.Now,
 		baselines:          make(map[string]counterBaseline),
+		portRoles:          make(map[string]string),
 	}, nil
 }
 
@@ -87,6 +86,13 @@ func (c *Collector) HandleStateGet(ctx context.Context) (agentcore.StateEnvelope
 
 // Collect gathers a full telemetry snapshot. When isPeriodic is false, delta baselines are not mutated.
 func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.StateEnvelope, error) {
+	if ctx == nil {
+		return agentcore.StateEnvelope{}, fmt.Errorf("collector context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return agentcore.StateEnvelope{}, err
+	}
+
 	var appliedUUID string
 	var portRoles map[string]string
 
@@ -102,7 +108,8 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 		}
 
 		if degraded {
-			c.logWarn("topology state is degraded; omitting physical port roles from link-state", "target", c.target)
+			c.logWarn("topology state is degraded; omitting physical port roles and applied uuid", "target", c.target)
+			appliedUUID = ""
 			portRoles = nil
 		} else {
 			portRoles = st.PhysicalPortRoles
@@ -116,7 +123,7 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 		c.logWarn("failed to read load averages", "error", err)
 	}
 
-	cpuLoad, err := c.reader.ReadCPULoad()
+	cpuLoad, err := c.reader.ReadCPULoad(isPeriodic)
 	if err != nil {
 		c.logWarn("failed to read cpu load", "error", err)
 	}
@@ -144,7 +151,10 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 
 	rawInterfaces, err := c.reader.ReadInterfaces(ctx)
 	if err != nil {
-		c.logWarn("failed to read interfaces", "error", err)
+		return agentcore.StateEnvelope{}, fmt.Errorf("read interfaces: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return agentcore.StateEnvelope{}, err
 	}
 
 	rawNeighbors, err := c.reader.ReadNeighbors(ctx)
@@ -164,10 +174,11 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 
 	c.mu.Lock()
 	if len(portRoles) > 0 {
-		// Group physical ports by role strictly using PhysicalPortRoles
+		// Group physical ports by role using PhysicalPortRoles, validating interface existence
 		roleToPorts := make(map[string][]string)
 		for port, role := range portRoles {
-			if !portKeyPattern.MatchString(port) {
+			if _, exists := rawMap[port]; !exists {
+				c.logWarn("omitting port from telemetry: interface does not exist", "port", port)
 				continue
 			}
 			roleLower := strings.ToLower(role)
@@ -200,19 +211,10 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 				ifaceName = "downv0"
 			}
 
-			// Collect associated devices (physical ports + master bridge if present)
-			associatedDevs := make(map[string]bool)
-			for _, p := range ports {
-				associatedDevs[p] = true
-				if link, err := os.Readlink(fmt.Sprintf("/sys/class/net/%s/master", p)); err == nil {
-					master := filepath.Base(link)
-					if master != "" && master != "." && master != "/" {
-						associatedDevs[master] = true
-					}
-				}
-			}
+			// Discover all associated devices (physical ports, master bridges, and VLAN subinterfaces)
+			orderedDevs := discoverAssociatedDevs(ports, rawMap)
 
-			// Aggregate counters strictly from the physical wire ports
+			// Aggregate counters strictly from the physical wire ports (never double-count VLAN/bridge counters)
 			var currCounters InterfaceCounters
 			for _, p := range ports {
 				if raw, ok := rawMap[p]; ok {
@@ -229,104 +231,70 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 				}
 			}
 
-			// IP Addresses & Uptime: check physical ports first, fallback to bridge
-			var ipv4Addrs []string
-			var ipv6Addrs []InterfaceIPv6Address
-			var dhcpServer string
-			var leaseTime uint32
-			var maxUptime uint64
+			// Aggregate IP addresses, DHCP metadata, and uptime across physical ports, bridges, and VLANs
+			ipv4Addrs, ipv6Addrs, dhcpServer, leaseTime, maxUptime := collectInterfaceAddressing(ports, orderedDevs, rawMap)
 
-			for _, p := range ports {
-				if raw, ok := rawMap[p]; ok {
-					if raw.Uptime > maxUptime {
-						maxUptime = raw.Uptime
-					}
-					if len(raw.IPv4Addresses) > 0 {
-						ipv4Addrs = append(ipv4Addrs, raw.IPv4Addresses...)
-					}
-					if raw.DHCPServer != "" && dhcpServer == "" {
-						dhcpServer = raw.DHCPServer
-					}
-					if raw.LeaseTime > 0 && leaseTime == 0 {
-						leaseTime = raw.LeaseTime
-					}
-					if len(raw.IPv6Addresses) > 0 {
-						ipv6Addrs = append(ipv6Addrs, raw.IPv6Addresses...)
-					}
-				}
-			}
+			// Collect and merge clients by MAC across all associated devices (ports + bridges + VLANs)
+			clients := mergeAssociatedClients(orderedDevs, clientsByDev)
 
-			if len(ipv4Addrs) == 0 {
-				for d := range associatedDevs {
-					if raw, ok := rawMap[d]; ok {
-						if raw.Uptime > maxUptime {
-							maxUptime = raw.Uptime
-						}
-						if len(raw.IPv4Addresses) > 0 {
-							ipv4Addrs = append(ipv4Addrs, raw.IPv4Addresses...)
-						}
-						if raw.DHCPServer != "" && dhcpServer == "" {
-							dhcpServer = raw.DHCPServer
-						}
-						if raw.LeaseTime > 0 && leaseTime == 0 {
-							leaseTime = raw.LeaseTime
-						}
-						if len(raw.IPv6Addresses) > 0 && len(ipv6Addrs) == 0 {
-							ipv6Addrs = append(ipv6Addrs, raw.IPv6Addresses...)
-						}
-					}
-				}
-			}
-
-			// Clients: collect and deduplicate from all associated devices (bridge + ports)
-			var clients []InterfaceClient
-			seenMACs := make(map[string]bool)
-			for d := range associatedDevs {
-				for _, cl := range clientsByDev[d] {
-					macLower := strings.ToLower(cl.MAC)
-					if !seenMACs[macLower] {
-						seenMACs[macLower] = true
-						clients = append(clients, cl)
-					}
-				}
-			}
-
-			// Baseline and delta calculation for the interface
+			// Baseline and delta calculation: calculated per physical wire port before aggregation
 			var deltas InterfaceDeltaCounters
-			b, hasBaseline := c.baselines[ifaceName]
-			if !hasBaseline || currCounters.RxBytes < b.rxBytes || currCounters.TxBytes < b.txBytes ||
-				currCounters.RxPackets < b.rxPackets || currCounters.TxPackets < b.txPackets {
-				deltas = InterfaceDeltaCounters{
-					RxBytes:   0,
-					RxPackets: 0,
-					TxBytes:   0,
-					TxPackets: 0,
+			for _, p := range ports {
+				raw, ok := rawMap[p]
+				if !ok {
+					continue
 				}
-				if isPeriodic {
-					c.baselines[ifaceName] = counterBaseline{
-						rxBytes:   currCounters.RxBytes,
-						txBytes:   currCounters.TxBytes,
-						rxPackets: currCounters.RxPackets,
-						txPackets: currCounters.TxPackets,
-						sampledAt: now,
+				currentIfaces[p] = true
+
+				prevRole, hadRole := c.portRoles[p]
+				roleChanged := !hadRole || prevRole != role
+				b, hasBaseline := c.baselines[p]
+				pCounters := raw.Counters
+
+				var pDelta InterfaceDeltaCounters
+				if roleChanged || !hasBaseline ||
+					pCounters.RxBytes < b.rxBytes || pCounters.TxBytes < b.txBytes ||
+					pCounters.RxPackets < b.rxPackets || pCounters.TxPackets < b.txPackets {
+					// Counter reset, new port, or port membership/role changed -> 0 delta, establish baseline
+					pDelta = InterfaceDeltaCounters{
+						RxBytes:   0,
+						RxPackets: 0,
+						TxBytes:   0,
+						TxPackets: 0,
+					}
+					if isPeriodic {
+						c.baselines[p] = counterBaseline{
+							rxBytes:   pCounters.RxBytes,
+							txBytes:   pCounters.TxBytes,
+							rxPackets: pCounters.RxPackets,
+							txPackets: pCounters.TxPackets,
+							sampledAt: now,
+						}
+						c.portRoles[p] = role
+					}
+				} else {
+					pDelta = InterfaceDeltaCounters{
+						RxBytes:   pCounters.RxBytes - b.rxBytes,
+						RxPackets: pCounters.RxPackets - b.rxPackets,
+						TxBytes:   pCounters.TxBytes - b.txBytes,
+						TxPackets: pCounters.TxPackets - b.txPackets,
+					}
+					if isPeriodic {
+						c.baselines[p] = counterBaseline{
+							rxBytes:   pCounters.RxBytes,
+							txBytes:   pCounters.TxBytes,
+							rxPackets: pCounters.RxPackets,
+							txPackets: pCounters.TxPackets,
+							sampledAt: now,
+						}
+						c.portRoles[p] = role
 					}
 				}
-			} else {
-				deltas = InterfaceDeltaCounters{
-					RxBytes:   currCounters.RxBytes - b.rxBytes,
-					RxPackets: currCounters.RxPackets - b.rxPackets,
-					TxBytes:   currCounters.TxBytes - b.txBytes,
-					TxPackets: currCounters.TxPackets - b.txPackets,
-				}
-				if isPeriodic {
-					c.baselines[ifaceName] = counterBaseline{
-						rxBytes:   currCounters.RxBytes,
-						txBytes:   currCounters.TxBytes,
-						rxPackets: currCounters.RxPackets,
-						txPackets: currCounters.TxPackets,
-						sampledAt: now,
-					}
-				}
+
+				deltas.RxBytes += pDelta.RxBytes
+				deltas.RxPackets += pDelta.RxPackets
+				deltas.TxBytes += pDelta.TxBytes
+				deltas.TxPackets += pDelta.TxPackets
 			}
 
 			ifaceState := InterfaceState{
@@ -345,7 +313,6 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 				}
 			}
 			interfaces = append(interfaces, ifaceState)
-			currentIfaces[ifaceName] = true
 		}
 	} else {
 		// Fallback for unconfigured or mock testing environments without port roles:
@@ -419,6 +386,7 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 		for name := range c.baselines {
 			if !currentIfaces[name] {
 				delete(c.baselines, name)
+				delete(c.portRoles, name)
 			}
 		}
 	}
@@ -430,8 +398,8 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 	}
 	if portRoles != nil {
 		for port, role := range portRoles {
-			if !portKeyPattern.MatchString(port) {
-				c.logWarn("omitting port from link-state: does not match physical interface naming convention", "port", port)
+			if _, exists := rawMap[port]; !exists {
+				c.logWarn("omitting port from link-state: interface does not exist", "port", port)
 				continue
 			}
 			ls, err := c.reader.ReadLinkState(ctx, port)
@@ -455,7 +423,7 @@ func (c *Collector) Collect(ctx context.Context, isPeriodic bool) (agentcore.Sta
 	}
 	rawLLDP, err := c.reader.ReadLLDPPeers(ctx)
 	if err == nil && len(rawLLDP) > 0 && portRoles != nil {
-		c.populateLLDP(rawLLDP, portRoles, &lldpReport)
+		c.populateLLDP(rawLLDP, portRoles, rawMap, &lldpReport)
 	}
 
 	payload := StatePayload{
@@ -563,9 +531,9 @@ func isIgnoredNeighborState(states []string) bool {
 	return false
 }
 
-func (c *Collector) populateLLDP(raw map[string]interface{}, portRoles map[string]string, report *LLDPPeersReport) {
+func (c *Collector) populateLLDP(raw map[string]interface{}, portRoles map[string]string, rawMap map[string]InterfaceRaw, report *LLDPPeersReport) {
 	for port, role := range portRoles {
-		if !portKeyPattern.MatchString(port) {
+		if _, exists := rawMap[port]; !exists {
 			continue
 		}
 		if peerData, ok := raw[port]; ok {
@@ -583,4 +551,193 @@ func (c *Collector) logWarn(msg string, kv ...any) {
 	if c.logger != nil {
 		c.logger.Warn(msg, kv...)
 	}
+}
+
+// discoverAssociatedDevs performs a breadth-first traversal starting from the physical ports
+// to collect master bridges and any stacked VLAN/upper subinterfaces.
+func discoverAssociatedDevs(ports []string, rawMap map[string]InterfaceRaw) []string {
+	seen := make(map[string]bool)
+	queue := make([]string, 0, len(ports))
+
+	enqueue := func(dev string) {
+		if dev == "" || dev == "." || dev == "/" || seen[dev] {
+			return
+		}
+		seen[dev] = true
+		queue = append(queue, dev)
+	}
+
+	for _, p := range ports {
+		enqueue(p)
+	}
+
+	for i := 0; i < len(queue); i++ {
+		dev := queue[i]
+
+		// 1. Check master bridge via raw metadata or sysfs
+		if raw, ok := rawMap[dev]; ok && raw.Master != "" {
+			enqueue(raw.Master)
+		} else if link, err := os.Readlink(fmt.Sprintf("/sys/class/net/%s/master", dev)); err == nil {
+			enqueue(filepath.Base(link))
+		}
+
+		// 2. Check upper interfaces (e.g. VLANs, bridges) via sysfs upper_* links
+		if matches, err := filepath.Glob(fmt.Sprintf("/sys/class/net/%s/upper_*", dev)); err == nil {
+			for _, m := range matches {
+				upper := strings.TrimPrefix(filepath.Base(m), "upper_")
+				enqueue(upper)
+			}
+		}
+
+		// 3. Check rawMap for child interfaces referencing this device via Link or "<dev>.<vid>" naming
+		prefix := dev + "."
+		for name, raw := range rawMap {
+			if raw.Link == dev || strings.HasPrefix(name, prefix) {
+				enqueue(name)
+			}
+		}
+	}
+
+	devs := make([]string, 0, len(seen))
+	for d := range seen {
+		devs = append(devs, d)
+	}
+	sort.Strings(devs)
+	return devs
+}
+
+// collectInterfaceAddressing aggregates deduplicated IPv4/IPv6 addresses, DHCP metadata,
+// and maximum uptime across physical ports and their associated bridges/VLANs.
+func collectInterfaceAddressing(ports, orderedDevs []string, rawMap map[string]InterfaceRaw) (
+	ipv4Addrs []string,
+	ipv6Addrs []InterfaceIPv6Address,
+	dhcpServer string,
+	leaseTime uint32,
+	maxUptime uint64,
+) {
+	seenV4 := make(map[string]bool)
+	seenV6 := make(map[string]bool)
+
+	processDev := func(d string) {
+		raw, ok := rawMap[d]
+		if !ok {
+			return
+		}
+		if raw.Uptime > maxUptime {
+			maxUptime = raw.Uptime
+		}
+		if raw.DHCPServer != "" && dhcpServer == "" {
+			dhcpServer = raw.DHCPServer
+		}
+		if raw.LeaseTime > 0 && leaseTime == 0 {
+			leaseTime = raw.LeaseTime
+		}
+		for _, ip := range raw.IPv4Addresses {
+			if !seenV4[ip] {
+				seenV4[ip] = true
+				ipv4Addrs = append(ipv4Addrs, ip)
+			}
+		}
+		for _, ip6 := range raw.IPv6Addresses {
+			if !seenV6[ip6.Address] {
+				seenV6[ip6.Address] = true
+				ipv6Addrs = append(ipv6Addrs, ip6)
+			}
+		}
+	}
+
+	// Prioritize physical ports first, then associated bridges/VLANs
+	portSet := make(map[string]bool, len(ports))
+	for _, p := range ports {
+		portSet[p] = true
+		processDev(p)
+	}
+	for _, d := range orderedDevs {
+		if !portSet[d] {
+			processDev(d)
+		}
+	}
+
+	return ipv4Addrs, ipv6Addrs, dhcpServer, leaseTime, maxUptime
+}
+
+// mergeAssociatedClients collects neighbors across all associated devices and merges
+// records sharing the same MAC address rather than dropping subsequent entries.
+func mergeAssociatedClients(orderedDevs []string, clientsByDev map[string][]InterfaceClient) []InterfaceClient {
+	type mergedClient struct {
+		mac      string
+		ipv4     map[string]bool
+		ipv6     map[string]bool
+		ports    map[string]bool
+		lastSeen *uint32
+	}
+
+	byMAC := make(map[string]*mergedClient)
+	for _, d := range orderedDevs {
+		for _, cl := range clientsByDev[d] {
+			macLower := strings.ToLower(cl.MAC)
+			entry, exists := byMAC[macLower]
+			if !exists {
+				entry = &mergedClient{
+					mac:   macLower,
+					ipv4:  make(map[string]bool),
+					ipv6:  make(map[string]bool),
+					ports: make(map[string]bool),
+				}
+				byMAC[macLower] = entry
+			}
+			for _, ip := range cl.IPv4Addresses {
+				entry.ipv4[ip] = true
+			}
+			for _, ip := range cl.IPv6Addresses {
+				entry.ipv6[ip] = true
+			}
+			for _, p := range cl.Ports {
+				entry.ports[p] = true
+			}
+			if cl.LastSeen != nil {
+				if entry.lastSeen == nil || *cl.LastSeen < *entry.lastSeen {
+					val := *cl.LastSeen
+					entry.lastSeen = &val
+				}
+			}
+		}
+	}
+
+	if len(byMAC) == 0 {
+		return nil
+	}
+
+	macs := make([]string, 0, len(byMAC))
+	for m := range byMAC {
+		macs = append(macs, m)
+	}
+	sort.Strings(macs)
+
+	clients := make([]InterfaceClient, 0, len(macs))
+	for _, m := range macs {
+		entry := byMAC[m]
+		var v4List, v6List, portList []string
+		for ip := range entry.ipv4 {
+			v4List = append(v4List, ip)
+		}
+		sort.Strings(v4List)
+		for ip := range entry.ipv6 {
+			v6List = append(v6List, ip)
+		}
+		sort.Strings(v6List)
+		for p := range entry.ports {
+			portList = append(portList, p)
+		}
+		sort.Strings(portList)
+
+		clients = append(clients, InterfaceClient{
+			MAC:           entry.mac,
+			IPv4Addresses: v4List,
+			IPv6Addresses: v6List,
+			Ports:         portList,
+			LastSeen:      entry.lastSeen,
+		})
+	}
+	return clients
 }

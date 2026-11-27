@@ -25,6 +25,7 @@ type Service struct {
 	mu                sync.Mutex
 	debug             DebugLogging
 	topologyDegraded  atomic.Bool
+	applyInProgress   atomic.Bool
 	onIntervalChanged func(intervalSec int)
 }
 
@@ -81,10 +82,10 @@ func (s *Service) SetOnIntervalChanged(fn func(interval int)) {
 	s.onIntervalChanged = fn
 }
 
-// IsTopologyDegraded returns true if a checkpoint save failure or unconfirmed rollback
-// left running topology in an indeterminate state.
+// IsTopologyDegraded returns true if a checkpoint save failure, unconfirmed rollback,
+// or an in-progress apply leaves running topology in an indeterminate state.
 func (s *Service) IsTopologyDegraded() bool {
-	return s.topologyDegraded.Load()
+	return s.topologyDegraded.Load() || s.applyInProgress.Load()
 }
 
 func (s *Service) Handle(ctx context.Context, msg agentcore.ConfigureNotification) error {
@@ -305,10 +306,24 @@ func (s *Service) processDesiredConfigLocked(ctx context.Context, msg agentcore.
 		s.logWarn("failed to publish configure status", "stage", "applying", "error", err)
 	}
 
+	s.applyInProgress.Store(true)
+	defer s.applyInProgress.Store(false)
+
 	if err := s.applyEngine.Apply(ctx, rendered); err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "rollback failed") || strings.Contains(strings.ToLower(err.Error()), "rollback_failed") {
+		errLower := strings.ToLower(err.Error())
+		if strings.Contains(errLower, "rollback failed") || strings.Contains(errLower, "rollback_failed") ||
+			strings.Contains(errLower, "discard failed") || strings.Contains(errLower, "save failed after successful commit") {
 			s.topologyDegraded.Store(true)
-			s.logError("configure apply and rollback failed: flagging topology as degraded", "target", msg.Target, "uuid", msg.UUID, "error", err)
+			s.logError("configure apply left topology unconfirmed: flagging topology as degraded", "target", msg.Target, "uuid", msg.UUID, "error", err)
+			if degradedState, loadErr := s.stateStore.Load(ctx); loadErr == nil {
+				if degradedState.Target == "" {
+					degradedState.Target = msg.Target
+				}
+				degradedState.TopologyDegraded = true
+				if saveErr := s.stateStore.Save(ctx, degradedState); saveErr != nil {
+					s.logError("failed to persist degraded topology state", "target", msg.Target, "uuid", msg.UUID, "error", saveErr)
+				}
+			}
 		}
 		return s.fail(ctx, msg, "apply_failed", "failed to apply rendered config", fmt.Errorf("apply rendered config: %w", err))
 	}
@@ -486,6 +501,16 @@ func extractStatisticsInterval(payload json.RawMessage) int {
 	if len(payload) == 0 {
 		return defaultInterval
 	}
+
+	// Support wrapped configuration payloads (e.g. {"uuid": ..., "config": { ... }})
+	// consistent with renderer payload normalization.
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &root); err == nil {
+		if wrapped, ok := root["config"]; ok && len(wrapped) > 0 {
+			payload = wrapped
+		}
+	}
+
 	var doc struct {
 		Metrics struct {
 			Statistics struct {

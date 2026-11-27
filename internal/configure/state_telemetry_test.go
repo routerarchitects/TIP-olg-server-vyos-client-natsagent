@@ -163,6 +163,98 @@ func TestPortMap_CheckpointSaveFailure_Degraded(t *testing.T) {
 	}
 }
 
+func TestPortMap_RollbackFailure_PersistsDegradedAndClearsOnSuccess(t *testing.T) {
+	store := &fakeStateStore{
+		loadState: state.State{
+			Target:            "vyos",
+			AppliedUUID:       "cfg-good",
+			PhysicalPortRoles: map[string]string{"eth0": "upstream"},
+		},
+	}
+	desired := newDesired("vyos", "cfg-bad")
+	client := &fakeConfigureClient{desired: desired}
+	rndr := &fakeRenderer{
+		output: renderer.Output{
+			Target:            "vyos",
+			UUID:              "cfg-bad",
+			PhysicalPortRoles: map[string]string{"eth0": "downstream"},
+		},
+	}
+	apply := &fakeApplyEngine{err: errors.New("commit failed; rollback failed")}
+
+	svc := newConfigureServiceForTest(t, client, store, rndr, apply, time.Now)
+	if err := svc.Handle(context.Background(), agentcore.ConfigureNotification{Target: "vyos", UUID: "cfg-bad", RPCID: "rpc-1"}); err == nil {
+		t.Fatal("expected error on rollback failure")
+	}
+
+	if !svc.IsTopologyDegraded() {
+		t.Fatal("rollback failure must flag topology degraded in memory")
+	}
+	if len(store.saved) == 0 || !store.saved[len(store.saved)-1].TopologyDegraded {
+		t.Fatalf("expected TopologyDegraded=true persisted to state store, got %+v", store.saved)
+	}
+
+	// Recovery on subsequent successful configure clears TopologyDegraded
+	apply.err = nil
+	client.desired = newDesired("vyos", "cfg-recover")
+	rndr.output.UUID = "cfg-recover"
+	if err := svc.Handle(context.Background(), agentcore.ConfigureNotification{Target: "vyos", UUID: "cfg-recover", RPCID: "rpc-2"}); err != nil {
+		t.Fatalf("recovery handle failed: %v", err)
+	}
+	if svc.IsTopologyDegraded() {
+		t.Fatal("expected TopologyDegraded cleared after successful configure and save")
+	}
+	last := store.saved[len(store.saved)-1]
+	if last.AppliedUUID != "cfg-recover" || last.TopologyDegraded {
+		t.Fatalf("expected clean recovered checkpoint, got %+v", last)
+	}
+}
+
+type blockingApplyEngine struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingApplyEngine) Apply(ctx context.Context, _ renderer.Output) error {
+	close(b.started)
+	select {
+	case <-b.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestPortMap_ApplyInProgress_MarksTopologyDegraded(t *testing.T) {
+	store := &fakeStateStore{}
+	client := &fakeConfigureClient{desired: newDesired("vyos", "cfg-1")}
+	rndr := &fakeRenderer{output: renderer.Output{Target: "vyos", UUID: "cfg-1"}}
+	apply := &blockingApplyEngine{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+
+	svc := newConfigureServiceForTest(t, client, store, rndr, apply, time.Now)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- svc.Handle(context.Background(), agentcore.ConfigureNotification{Target: "vyos", UUID: "cfg-1", RPCID: "rpc-1"})
+	}()
+
+	<-apply.started
+	if !svc.IsTopologyDegraded() {
+		t.Fatal("expected IsTopologyDegraded() true while Apply is in progress")
+	}
+	close(apply.release)
+
+	if err := <-done; err != nil {
+		t.Fatalf("handle failed: %v", err)
+	}
+	if svc.IsTopologyDegraded() {
+		t.Fatal("expected IsTopologyDegraded() false after Apply completes")
+	}
+}
+
 func TestPortMap_LegacyCheckpointUpgrade(t *testing.T) {
 	desired := newDesired("vyos", "cfg-legacy")
 	client := &fakeConfigureClient{desired: desired}
@@ -273,5 +365,76 @@ func TestInterval_DynamicAdjustments(t *testing.T) {
 	_ = svc.Handle(context.Background(), agentcore.ConfigureNotification{Target: "vyos", UUID: "cfg-fail", RPCID: "rpc-3"})
 	if reportedInterval != 999 {
 		t.Fatalf("failed apply must not invoke interval change callback, got %d", reportedInterval)
+	}
+}
+
+func TestExtractStatisticsInterval(t *testing.T) {
+	tests := []struct {
+		name     string
+		payload  string
+		expected int
+	}{
+		{
+			name:     "empty payload",
+			payload:  "",
+			expected: 60,
+		},
+		{
+			name:     "invalid json",
+			payload:  "not-json",
+			expected: 60,
+		},
+		{
+			name:     "unwrapped metrics with 300s interval",
+			payload:  `{"metrics":{"statistics":{"interval":300}}}`,
+			expected: 300,
+		},
+		{
+			name: "wrapped in config envelope with 300s interval",
+			payload: `{
+				"uuid": 12345,
+				"config": {
+					"metrics": {
+						"statistics": {
+							"interval": 300
+						}
+					}
+				}
+			}`,
+			expected: 300,
+		},
+		{
+			name: "wrapped in config envelope with sub-60 interval falls back to 60",
+			payload: `{
+				"uuid": 12345,
+				"config": {
+					"metrics": {
+						"statistics": {
+							"interval": 15
+						}
+					}
+				}
+			}`,
+			expected: 60,
+		},
+		{
+			name: "wrapped in config envelope without metrics falls back to 60",
+			payload: `{
+				"uuid": 12345,
+				"config": {
+					"interfaces": []
+				}
+			}`,
+			expected: 60,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractStatisticsInterval(json.RawMessage(tc.payload))
+			if got != tc.expected {
+				t.Errorf("extractStatisticsInterval() = %d, expected %d", got, tc.expected)
+			}
+		})
 	}
 }
