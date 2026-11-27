@@ -11,15 +11,15 @@ import (
 )
 
 type mockSystemReader struct {
-	loadAvg    [3]float64
-	cpuLoad    []int
-	memInfo    MemoryState
+	loadAvg       [3]float64
+	cpuLoad       []int
+	memInfo       MemoryState
 	uptime        uint64
 	interfaces    []InterfaceRaw
 	interfacesErr error
 	neighbors     []NeighborRaw
-	linkStates map[string]PortLinkState
-	lldpPeers  map[string]interface{}
+	linkStates    map[string]PortLinkState
+	lldpPeers     map[string]interface{}
 }
 
 func (m *mockSystemReader) ReadLoadAvg() ([3]float64, error) {
