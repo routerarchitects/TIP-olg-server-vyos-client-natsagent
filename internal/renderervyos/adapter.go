@@ -111,10 +111,22 @@ func (a *Adapter) Render(ctx context.Context, desired agentcore.StoredDesiredCon
 	}
 
 	return renderer.Output{
-		Target: out.Target,
-		UUID:   out.ConfigUUID,
-		Text:   out.RenderedText,
+		Target:            out.Target,
+		UUID:              out.ConfigUUID,
+		Text:              out.RenderedText,
+		PhysicalPortRoles: clonePortRoles(out.PhysicalPortRoles),
 	}, nil
+}
+
+func clonePortRoles(src map[string]string) map[string]string {
+	if len(src) == 0 {
+		return nil
+	}
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 func BuildInput(desired agentcore.StoredDesiredConfig) (vyosrenderer.Input, error) {

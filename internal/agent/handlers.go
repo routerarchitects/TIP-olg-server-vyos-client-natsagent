@@ -15,6 +15,13 @@ func (r *Runtime) registerHandlers() error {
 	}
 	r.logInfo("configure handler registered", "target", target)
 
+	if r.collector != nil {
+		if err := r.client.RegisterStateGetHandler(target, r.collector.HandleStateGet); err != nil {
+			return fmt.Errorf("register state get handler: %w", err)
+		}
+		r.logInfo("state get handler registered", "target", target)
+	}
+
 	for _, action := range r.appConfig.Agent.Actions.Enabled {
 		if err := r.client.RegisterActionHandler(target, action, r.handleAction); err != nil {
 			return fmt.Errorf("register action handler %q: %w", action, err)

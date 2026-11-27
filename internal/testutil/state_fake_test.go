@@ -3,6 +3,7 @@ package testutil
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/Telecominfraproject/olg-server-vyos-client-natsagent/internal/state"
@@ -44,7 +45,7 @@ func TestFakeStateStoreSaveErrDoesNotRecordSavedState(t *testing.T) {
 	if _, ok := store.LastSavedState(); ok {
 		t.Fatal("last saved state reported true after failed save")
 	}
-	if store.Current != initial {
+	if !reflect.DeepEqual(store.Current, initial) {
 		t.Fatalf("current state mutated got=%+v want=%+v", store.Current, initial)
 	}
 }
@@ -78,10 +79,10 @@ func TestFakeStateStoreSuccessfulSaveRecordsSavedState(t *testing.T) {
 	if !ok {
 		t.Fatal("last saved state missing")
 	}
-	if got != next {
+	if !reflect.DeepEqual(got, next) {
 		t.Fatalf("last saved state got=%+v want=%+v", got, next)
 	}
-	if store.Current != next {
+	if !reflect.DeepEqual(store.Current, next) {
 		t.Fatalf("current state got=%+v want=%+v", store.Current, next)
 	}
 }

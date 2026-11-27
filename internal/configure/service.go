@@ -2,10 +2,12 @@ package configure
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Telecominfraproject/olg-nats-agent-core/agentcore"
@@ -14,24 +16,28 @@ import (
 )
 
 type Service struct {
-	client      AgentCoreClient
-	stateStore  StateStore
-	renderer    Renderer
-	applyEngine ApplyEngine
-	logger      agentcore.Logger
-	now         func() time.Time
-	mu          sync.Mutex
-	debug       DebugLogging
+	client            AgentCoreClient
+	stateStore        StateStore
+	renderer          Renderer
+	applyEngine       ApplyEngine
+	logger            agentcore.Logger
+	now               func() time.Time
+	mu                sync.Mutex
+	debug             DebugLogging
+	topologyDegraded  atomic.Bool
+	applyInProgress   atomic.Bool
+	onIntervalChanged func(intervalSec int)
 }
 
 type Dependencies struct {
-	Client      AgentCoreClient
-	StateStore  StateStore
-	Renderer    Renderer
-	ApplyEngine ApplyEngine
-	Logger      agentcore.Logger
-	Debug       DebugLogging
-	Now         func() time.Time
+	Client            AgentCoreClient
+	StateStore        StateStore
+	Renderer          Renderer
+	ApplyEngine       ApplyEngine
+	Logger            agentcore.Logger
+	Debug             DebugLogging
+	Now               func() time.Time
+	OnIntervalChanged func(intervalSec int)
 }
 
 type DebugLogging struct {
@@ -58,14 +64,28 @@ func NewService(deps Dependencies) (*Service, error) {
 	}
 
 	return &Service{
-		client:      deps.Client,
-		stateStore:  deps.StateStore,
-		renderer:    deps.Renderer,
-		applyEngine: deps.ApplyEngine,
-		logger:      deps.Logger,
-		now:         deps.Now,
-		debug:       deps.Debug,
+		client:            deps.Client,
+		stateStore:        deps.StateStore,
+		renderer:          deps.Renderer,
+		applyEngine:       deps.ApplyEngine,
+		logger:            deps.Logger,
+		now:               deps.Now,
+		debug:             deps.Debug,
+		onIntervalChanged: deps.OnIntervalChanged,
 	}, nil
+}
+
+// SetOnIntervalChanged sets the callback invoked when a desired configuration changes the telemetry interval.
+func (s *Service) SetOnIntervalChanged(fn func(interval int)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onIntervalChanged = fn
+}
+
+// IsTopologyDegraded returns true if a checkpoint save failure, unconfirmed rollback,
+// or an in-progress apply leaves running topology in an indeterminate state.
+func (s *Service) IsTopologyDegraded() bool {
+	return s.topologyDegraded.Load() || s.applyInProgress.Load()
 }
 
 func (s *Service) Handle(ctx context.Context, msg agentcore.ConfigureNotification) error {
@@ -189,6 +209,9 @@ func (s *Service) Reconcile(ctx context.Context, target string) error {
 
 	if localState.Target == target && localState.AppliedUUID == desired.Record.UUID {
 		s.logInfo("reconcile: already in sync", "target", target, "uuid", desired.Record.UUID)
+		if s.onIntervalChanged != nil {
+			s.onIntervalChanged(extractStatisticsInterval(desired.Record.Payload))
+		}
 		return nil
 	}
 
@@ -217,6 +240,36 @@ func (s *Service) Reconcile(ctx context.Context, target string) error {
 	}()
 
 	return s.processDesiredConfigLocked(ctx, msg, desired)
+}
+
+// UpgradeLegacyCheckpoint regenerates port roles from verified desired config if checkpoint lacks physical_port_roles.
+func (s *Service) UpgradeLegacyCheckpoint(ctx context.Context, target string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	localState, err := s.stateStore.Load(ctx)
+	if err != nil || localState.AppliedUUID == "" || len(localState.PhysicalPortRoles) > 0 || localState.TopologyDegraded {
+		return nil
+	}
+
+	desired, err := s.client.LoadDesiredConfig(ctx, target)
+	if err != nil || desired == nil || desired.Record.UUID != localState.AppliedUUID {
+		return nil
+	}
+
+	rendered, err := s.renderer.Render(ctx, *desired)
+	if err != nil || len(rendered.PhysicalPortRoles) == 0 {
+		return nil
+	}
+
+	localState.PhysicalPortRoles = rendered.PhysicalPortRoles
+	if saveErr := s.stateStore.Save(ctx, localState); saveErr != nil {
+		s.topologyDegraded.Store(true)
+		s.logError("legacy checkpoint upgrade save failed: flagging topology as degraded", "target", target, "uuid", desired.Record.UUID, "error", saveErr)
+		return saveErr
+	}
+	s.logInfo("legacy checkpoint upgraded with physical port roles", "target", target, "uuid", desired.Record.UUID)
+	return nil
 }
 
 // processDesiredConfigLocked renders, applies, saves state, and publishes statuses/results.
@@ -253,19 +306,45 @@ func (s *Service) processDesiredConfigLocked(ctx context.Context, msg agentcore.
 		s.logWarn("failed to publish configure status", "stage", "applying", "error", err)
 	}
 
+	s.applyInProgress.Store(true)
+	defer s.applyInProgress.Store(false)
+
 	if err := s.applyEngine.Apply(ctx, rendered); err != nil {
+		errLower := strings.ToLower(err.Error())
+		if strings.Contains(errLower, "rollback failed") || strings.Contains(errLower, "rollback_failed") ||
+			strings.Contains(errLower, "discard failed") || strings.Contains(errLower, "save failed after successful commit") {
+			s.topologyDegraded.Store(true)
+			s.logError("configure apply left topology unconfirmed: flagging topology as degraded", "target", msg.Target, "uuid", msg.UUID, "error", err)
+			if degradedState, loadErr := s.stateStore.Load(ctx); loadErr == nil {
+				if degradedState.Target == "" {
+					degradedState.Target = msg.Target
+				}
+				degradedState.TopologyDegraded = true
+				if saveErr := s.stateStore.Save(ctx, degradedState); saveErr != nil {
+					s.logError("failed to persist degraded topology state", "target", msg.Target, "uuid", msg.UUID, "error", saveErr)
+				}
+			}
+		}
 		return s.fail(ctx, msg, "apply_failed", "failed to apply rendered config", fmt.Errorf("apply rendered config: %w", err))
 	}
 
 	s.logInfo("configure applied", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID, "stage", "applied")
 
 	nextState := state.State{
-		Target:      msg.Target,
-		AppliedUUID: desired.Record.UUID,
-		AppliedAt:   s.now().UTC(),
+		Target:            msg.Target,
+		AppliedUUID:       desired.Record.UUID,
+		AppliedAt:         s.now().UTC(),
+		PhysicalPortRoles: rendered.PhysicalPortRoles,
+		TopologyDegraded:  false,
 	}
 	if err := s.stateStore.Save(ctx, nextState); err != nil {
+		s.topologyDegraded.Store(true)
+		s.logError("configure checkpoint save failed: flagging topology as degraded", "target", msg.Target, "uuid", msg.UUID, "error", err)
 		return s.reportingFailure(msg, fmt.Errorf("save local state: %w", err))
+	}
+	s.topologyDegraded.Store(false)
+	if s.onIntervalChanged != nil {
+		s.onIntervalChanged(extractStatisticsInterval(desired.Record.Payload))
 	}
 	s.logInfo("configure state saved", "target", msg.Target, "rpc_id", msg.RPCID, "uuid", msg.UUID)
 
@@ -415,4 +494,35 @@ func countNonEmptyLines(text string) int {
 		count++
 	}
 	return count
+}
+
+func extractStatisticsInterval(payload json.RawMessage) int {
+	const defaultInterval = 60
+	if len(payload) == 0 {
+		return defaultInterval
+	}
+
+	// Support wrapped configuration payloads (e.g. {"uuid": ..., "config": { ... }})
+	// consistent with renderer payload normalization.
+	var root map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &root); err == nil {
+		if wrapped, ok := root["config"]; ok && len(wrapped) > 0 {
+			payload = wrapped
+		}
+	}
+
+	var doc struct {
+		Metrics struct {
+			Statistics struct {
+				Interval int `json:"interval"`
+			} `json:"statistics"`
+		} `json:"metrics"`
+	}
+	if err := json.Unmarshal(payload, &doc); err != nil {
+		return defaultInterval
+	}
+	if doc.Metrics.Statistics.Interval >= 60 {
+		return doc.Metrics.Statistics.Interval
+	}
+	return defaultInterval
 }

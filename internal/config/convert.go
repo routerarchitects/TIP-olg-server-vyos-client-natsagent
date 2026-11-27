@@ -40,9 +40,20 @@ func (c AppConfig) ToAgentCoreConfig() (agentcore.Config, error) {
 		return agentcore.Config{}, err
 	}
 
+	stateWorkers := c.Agent.State.MaxConcurrentRequests
+	if stateWorkers <= 0 {
+		stateWorkers = 5
+	}
+	maxStateSize := c.Agent.State.MaxStateSizeBytes
+	if maxStateSize < 1024*1024 {
+		maxStateSize = 1024 * 1024
+	}
+
 	return agentcore.Config{
-		AgentName: c.Agent.Name,
-		Version:   c.Agent.Version,
+		AgentName:        c.Agent.Name,
+		Version:          c.Agent.Version,
+		StateGetWorkers:  stateWorkers,
+		StateMaxWireSize: maxStateSize,
 		NATS: agentcore.NATSConfig{
 			Servers:              c.AgentCore.NATS.Servers,
 			ClientName:           c.AgentCore.NATS.ClientName,
@@ -77,6 +88,8 @@ func (c AppConfig) ToAgentCoreConfig() (agentcore.Config, error) {
 			ResultPattern:    c.AgentCore.Subjects.ResultPattern,
 			StatusPattern:    c.AgentCore.Subjects.StatusPattern,
 			HealthPattern:    c.AgentCore.Subjects.HealthPattern,
+			StatePattern:     c.AgentCore.Subjects.StatePattern,
+			StateGetPattern:  c.AgentCore.Subjects.StateGetPattern,
 		},
 		KV: agentcore.KVConfig{
 			Bucket:           c.AgentCore.KV.Bucket,

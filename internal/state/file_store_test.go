@@ -31,7 +31,7 @@ func TestLoadMissingFileReturnsEmptyState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if got != (State{}) {
+	if !got.IsZero() {
 		t.Fatalf("expected empty state, got %+v", got)
 	}
 }
@@ -223,7 +223,7 @@ func TestLoadMalformedJSONReturnsEmptyState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected no error for malformed state, got: %v", err)
 	}
-	if got != (State{}) {
+	if !got.IsZero() {
 		t.Fatalf("expected empty state, got %+v", got)
 	}
 }

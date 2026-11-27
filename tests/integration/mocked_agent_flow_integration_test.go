@@ -371,8 +371,15 @@ func TestIntegrationActionTraceFlowRealModeMocked(t *testing.T) {
 	startAgentCoreClient(t, worker)
 	controller := newStartedClient(t, cfg, "controller")
 
+	traceIface := "eth0"
+	if _, err := net.InterfaceByName("eth0"); err != nil {
+		if ifaces, err := net.Interfaces(); err == nil && len(ifaces) > 0 {
+			traceIface = ifaces[0].Name
+		}
+	}
+
 	// Payload matching the expected JSON
-	payload := json.RawMessage(fmt.Sprintf(`{"interface":"eth0","duration":5,"packets":20,"uri":%q}`, server.URL))
+	payload := json.RawMessage(fmt.Sprintf(`{"interface":%q,"duration":5,"packets":20,"uri":%q}`, traceIface, server.URL))
 
 	ack, err := controller.SubmitAction(context.Background(), agentcore.ActionCommand{
 		Version:     mockedIntegrationWireVersion,

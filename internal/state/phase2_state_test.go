@@ -66,7 +66,7 @@ func TestStateLoadMissingFileReturnsDefaultState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load state: %v", err)
 	}
-	if got != (State{}) {
+	if !got.IsZero() {
 		t.Fatalf("state got=%+v want empty state", got)
 	}
 }
@@ -91,7 +91,7 @@ func TestStateLoadCorruptJSONFailsSafely(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != (State{}) {
+	if !got.IsZero() {
 		t.Fatalf("expected empty state, got %+v", got)
 	}
 }
@@ -120,7 +120,7 @@ func TestStateLoadInvalidUUIDFailsSafely(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got != (State{}) {
+	if !got.IsZero() {
 		t.Fatalf("expected empty state, got %+v", got)
 	}
 }

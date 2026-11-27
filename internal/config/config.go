@@ -10,11 +10,18 @@ type AgentConfig struct {
 	Version   string          `yaml:"version"`
 	Target    string          `yaml:"target"`
 	StateFile string          `yaml:"state_file"`
+	State     StateConfig     `yaml:"state"`
 	Logging   LoggingConfig   `yaml:"logging"`
 	Configure ConfigureConfig `yaml:"configure"`
 	Debug     DebugConfig     `yaml:"debug"`
 	Apply     ApplyConfig     `yaml:"apply"`
 	Actions   ActionsConfig   `yaml:"actions"`
+}
+
+type StateConfig struct {
+	Interval              string `yaml:"interval"`
+	MaxConcurrentRequests int    `yaml:"max_concurrent_requests"`
+	MaxStateSizeBytes     int    `yaml:"max_state_size_bytes"`
 }
 
 type LoggingConfig struct {
@@ -90,6 +97,8 @@ type SubjectConfig struct {
 	ResultPattern    string `yaml:"result_pattern"`
 	StatusPattern    string `yaml:"status_pattern"`
 	HealthPattern    string `yaml:"health_pattern"`
+	StatePattern     string `yaml:"state_pattern"`
+	StateGetPattern  string `yaml:"state_get_pattern"`
 }
 
 type KVConfig struct {

@@ -110,7 +110,59 @@ func (r *Runtime) Start(ctx context.Context) error {
 		r.logInfo("startup reconcile completed", "target", r.appConfig.Agent.Target)
 	}
 
+	if err := r.configureService.UpgradeLegacyCheckpoint(ctx, r.appConfig.Agent.Target); err != nil {
+		r.logWarn("legacy checkpoint upgrade completed with error", "target", r.appConfig.Agent.Target, "error", err)
+	}
+
+	if r.collector != nil {
+		r.wg.Add(1)
+		go r.runStateLoop(r.ctx)
+	}
+
 	return nil
+}
+
+func (r *Runtime) runStateLoop(ctx context.Context) {
+	defer r.wg.Done()
+
+	interval := r.stateInterval
+	if interval <= 0 {
+		interval = 60 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	r.publishStateOnce(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case newInterval := <-r.stateIntervalCh:
+			if newInterval >= time.Second && newInterval != interval {
+				interval = newInterval
+				ticker.Reset(interval)
+				r.logInfo("state collection interval dynamically adjusted", "interval", interval)
+			}
+		case <-ticker.C:
+			r.publishStateOnce(ctx)
+		}
+	}
+}
+
+func (r *Runtime) publishStateOnce(ctx context.Context) {
+	if r.collector == nil || r.client == nil {
+		return
+	}
+	env, err := r.collector.Collect(ctx, true)
+	if err != nil {
+		r.logWarn("failed to collect state", "error", err)
+		return
+	}
+	if err := r.client.PublishState(ctx, env); err != nil {
+		r.logWarn("failed to publish periodic state", "error", err)
+	}
 }
 
 // Close stops the agentcore client lifecycle.
