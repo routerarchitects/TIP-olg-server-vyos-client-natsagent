@@ -44,11 +44,16 @@ func (c AppConfig) ToAgentCoreConfig() (agentcore.Config, error) {
 	if stateWorkers <= 0 {
 		stateWorkers = 5
 	}
+	maxStateSize := c.Agent.State.MaxStateSizeBytes
+	if maxStateSize < 1024*1024 {
+		maxStateSize = 1024 * 1024
+	}
 
 	return agentcore.Config{
-		AgentName:       c.Agent.Name,
-		Version:         c.Agent.Version,
-		StateGetWorkers: stateWorkers,
+		AgentName:        c.Agent.Name,
+		Version:          c.Agent.Version,
+		StateGetWorkers:  stateWorkers,
+		StateMaxWireSize: maxStateSize,
 		NATS: agentcore.NATSConfig{
 			Servers:              c.AgentCore.NATS.Servers,
 			ClientName:           c.AgentCore.NATS.ClientName,

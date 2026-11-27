@@ -15,6 +15,7 @@ func DefaultAppConfig() AppConfig {
 			State: StateConfig{
 				Interval:              "60s",
 				MaxConcurrentRequests: 5,
+				MaxStateSizeBytes:     1024 * 1024,
 			},
 			Logging: LoggingConfig{
 				Enabled: true,

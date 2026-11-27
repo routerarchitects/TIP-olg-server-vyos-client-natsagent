@@ -21,6 +21,7 @@ type AgentConfig struct {
 type StateConfig struct {
 	Interval              string `yaml:"interval"`
 	MaxConcurrentRequests int    `yaml:"max_concurrent_requests"`
+	MaxStateSizeBytes     int    `yaml:"max_state_size_bytes"`
 }
 
 type LoggingConfig struct {
